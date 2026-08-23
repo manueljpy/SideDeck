@@ -1,0 +1,1 @@
+Initial release: dual-deck DJ UI, waveforms, internal mixer, BPM/key analysis, local library, Subsonic connect, and USB audio output to external mixers.
