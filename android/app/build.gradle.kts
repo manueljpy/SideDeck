@@ -71,6 +71,14 @@ android {
             }
         }
     }
+
+    // F-Droid rejects AGP's Google-only "Dependency metadata" signing block.
+    // Play/local builds keep it; F-Droid sets -Pfdroid (see metadata YAML).
+    dependenciesInfo {
+        val forFdroid = project.hasProperty("fdroid")
+        includeInApk = !forFdroid
+        includeInBundle = !forFdroid
+    }
 }
 
 kotlin {
