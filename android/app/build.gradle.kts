@@ -14,7 +14,13 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "es.manifold.sidedeck"
-    compileSdk = 37
+    // sdkmanager installs API 37 as platforms/android-37.0; plain `compileSdk = 37`
+    // looks up android-37 and fails on F-Droid / CI. minorApiLevel selects 37.0.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

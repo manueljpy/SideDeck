@@ -21,17 +21,19 @@ subprojects {
     }
 }
 
+// Force plugins (e.g. permission_handler) onto API 37.0 as well. Integer
+// compileSdk 37 resolves to a missing platforms/android-37 directory.
 subprojects {
     afterEvaluate {
         extensions.findByName("android")?.let { androidExt ->
             try {
                 androidExt.javaClass
-                    .getMethod("setCompileSdk", Int::class.javaPrimitiveType)
-                    .invoke(androidExt, 37)
+                    .getMethod("setCompileSdkVersion", String::class.java)
+                    .invoke(androidExt, "android-37.0")
             } catch (_: Throwable) {
                 try {
                     androidExt.javaClass
-                        .getMethod("setCompileSdkVersion", Int::class.javaPrimitiveType)
+                        .getMethod("setCompileSdk", Int::class.javaPrimitiveType)
                         .invoke(androidExt, 37)
                 } catch (_: Throwable) {
                     // Ignore plugins without a compatible DSL setter.

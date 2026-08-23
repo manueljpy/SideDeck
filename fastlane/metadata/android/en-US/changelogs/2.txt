@@ -1,0 +1,1 @@
+Fix Android SDK 37 build on F-Droid/CI (compileSdk 37.0).
