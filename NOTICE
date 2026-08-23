@@ -1,0 +1,43 @@
+SideDeck
+Copyright (C) 2026 SideDeck contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the file LICENSE for the full text.
+
+This distribution includes third-party software. Their licenses remain in force.
+
+Oboe (Apache License 2.0)
+  third_party/oboe
+  https://github.com/google/oboe
+  Android audio I/O
+
+dr_libs — dr_mp3 / dr_wav (public domain / MIT-0)
+  third_party/dr_libs
+  https://github.com/mackron/dr_libs
+  MP3 and WAV decode
+
+Signalsmith Stretch (MIT)
+  third_party/signalsmith-stretch
+  https://github.com/Signalsmith-Audio/signalsmith-stretch
+  Keylock time-stretch
+
+Signalsmith Linear (MIT)
+  third_party/signalsmith-linear
+  https://github.com/Signalsmith-Audio/linear
+  FFT / STFT used by Signalsmith Stretch
+
+qm-dsp (GNU General Public License 2.0 or later)
+  third_party/qm-dsp
+  https://github.com/c4dm/qm-dsp
+  Queen Mary beat tracking (DetectionFunction, TempoTrackV2) and
+  key detection (GetKeyMode, Chromagram, ConstantQ, Decimator).
+  Bundled kissfft is BSD-3-Clause (see third_party/qm-dsp/ext/kissfft).
+
+Mixxx BeatUtils (GNU General Public License 2.0 or later)
+  Copyright (C) Mixxx developers
+  native/engine/beat_utils.hpp
+  Ported from Mixxx src/track/beatutils.cpp
+  https://github.com/mixxxdj/mixxx
+  Constant-tempo ironing / BPM from Queen Mary beats.

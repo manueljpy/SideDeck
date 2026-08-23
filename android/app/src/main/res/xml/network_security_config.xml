@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Android 9+ blocks cleartext HTTP. LAN Subsonic/Navidrome is often
+         http://192.168.x.x. Use HTTPS off-LAN. IP ranges cannot be matched
+         here, so HTTP is allowed globally. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,0 +1,4 @@
+storePassword=<password>
+keyPassword=<password>
+keyAlias=upload
+storeFile=/absolute/path/to/sidedeck-upload.jks
