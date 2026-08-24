@@ -4,6 +4,9 @@ project(dj_engine VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# F-Droid reproducible builds: GNU build-ids differ across machines.
+add_link_options("-Wl,--build-id=none")
+
 # android/app/src/main/cpp -> project root
 get_filename_component(SIDEDECK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 
