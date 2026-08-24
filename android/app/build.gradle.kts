@@ -41,9 +41,8 @@ android {
                 arguments += listOf("-DANDROID_STL=c++_shared")
             }
         }
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
+        // Do not set ndk.abiFilters here: it conflicts with Flutter
+        // `--split-per-abi` / AGP ABI splits used for F-Droid.
     }
 
     if (keystorePropertiesFile.exists()) {
