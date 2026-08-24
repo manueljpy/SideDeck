@@ -1,1 +1,0 @@
-Strip AGP dependency-metadata signing block so F-Droid check_apk accepts the APK.
