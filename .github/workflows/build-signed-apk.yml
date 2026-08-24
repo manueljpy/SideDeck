@@ -19,43 +19,50 @@ jobs:
       SOURCE_DATE_EPOCH: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Flutter revision from .metadata
-        id: flutter
+      # Same Flutter pin as F-Droid: checkout the .metadata revision (not flutter-action git-ref).
+      - name: Install Flutter
         run: |
+          set -euo pipefail
           rev=$(sed -n -E 's/.*revision: "(.*)"/\1/p' .metadata | head -n1)
-          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          test -n "$rev"
+          git clone --filter=blob:none https://github.com/flutter/flutter.git "$HOME/flutter"
+          git -C "$HOME/flutter" fetch --depth 1 origin "$rev"
+          git -C "$HOME/flutter" checkout --force FETCH_HEAD
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+          echo "FLUTTER_ROOT=$HOME/flutter" >> "$GITHUB_ENV"
           echo "Flutter revision $rev"
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          git-ref: ${{ steps.flutter.outputs.revision }}
-          cache: false
-
       - name: Flutter config
-        run: flutter config --no-analytics
+        run: |
+          set -euo pipefail
+          flutter config --no-analytics
+          flutter --version
+          rev=$(sed -n -E 's/.*revision: "(.*)"/\1/p' .metadata | head -n1)
+          flutter --version | grep -F "${rev:0:10}"
 
       - name: Disable dependency metadata in APK
         run: echo "fdroid=true" >> android/gradle.properties
 
+      # Match fdroiddata recipe (no --enforce-lockfile).
       - name: Pub get
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
       - name: Patch jni build-id
         run: |
+          set -euo pipefail
           shopt -s nullglob
           files=("$PUB_CACHE"/hosted/pub.dev/jni-*/src/CMakeLists.txt)
           if ((${#files[@]} == 0)); then
-            echo "No jni CMakeLists.txt found"
+            echo "No jni CMakeLists.txt found under $PUB_CACHE"
+            ls -la "$PUB_CACHE/hosted/pub.dev" | head -50
             exit 1
           fi
           sed -i -e 's/-Wl,/-Wl,--build-id=none,/' "${files[@]}"
@@ -67,14 +74,18 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          test -n "$KEYSTORE_BASE64"
+          set -euo pipefail
+          test -n "${KEYSTORE_BASE64:-}"
+          test -n "${KEYSTORE_PASSWORD:-}"
+          test -n "${KEY_PASSWORD:-}"
+          test -n "${KEY_ALIAS:-}"
           echo "$KEYSTORE_BASE64" | base64 -d > android/app/bb3d.keystore
-          cat > android/key.properties <<EOF
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEY_PASSWORD
-          keyAlias=$KEY_ALIAS
-          storeFile=bb3d.keystore
-          EOF
+          printf '%s\n' \
+            "storePassword=$KEYSTORE_PASSWORD" \
+            "keyPassword=$KEY_PASSWORD" \
+            "keyAlias=$KEY_ALIAS" \
+            "storeFile=bb3d.keystore" \
+            > android/key.properties
 
       - name: Build armeabi-v7a
         run: flutter build apk --release --split-per-abi --target-platform=android-arm -Pfdroid=true
