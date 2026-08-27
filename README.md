@@ -1,15 +1,27 @@
-# SideDeck
+<p align="center">
+  <img src="fastlane/metadata/android/en-US/images/icon.png" alt="SideDeck" width="128">
+</p>
+<h2 align="center"><b>SideDeck</b></h2>
+<h4 align="center">Free DJ app for Android. Mix on your phone, or on hardware.</h4>
+
+<p align="center">
+  <a href="https://f-droid.org/packages/es.manifold.sidedeck">
+    <img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.svg"
+         alt="Get it on F-Droid"
+         width="206">
+  </a>
+</p>
 
 Android DJ deck for local files and a Subsonic music server. Landscape dual
-decks, waveforms, and an internal mixer — or four-channel USB out to an
+decks, waveforms, and an internal mixer, or four-channel USB out to an
 external mixer such as the Teenage Engineering EP-136 K.O. Sidekick.
 
 ![SideDeck](screenshots/mix.png)
 
 ## Requirements
 
-- Flutter stable (SDK ^3.12) — see [install Flutter](https://docs.flutter.dev/get-started/install)
-- Android NDK (ships with Flutter / Android Studio) — the audio engine is C++
+- Flutter stable (SDK ^3.12) - see [install Flutter](https://docs.flutter.dev/get-started/install)
+- Android NDK (ships with Flutter / Android Studio) - the audio engine is C++
 - Android 8.0+ (API 26), arm64 recommended
 - USB host support on the device if you use an external mixer
 
