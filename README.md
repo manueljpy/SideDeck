@@ -5,11 +5,8 @@
 <h4 align="center">Free DJ app for Android. Mix on your phone, or on hardware.</h4>
 
 <p align="center">
-  <a href="https://f-droid.org/packages/es.manifold.sidedeck">
-    <img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.svg"
-         alt="Get it on F-Droid"
-         width="206">
-  </a>
+  <a href="https://f-droid.org/packages/es.manifold.sidedeck"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.svg" alt="Get it on F-Droid" height="80"></a>
+  <a href="https://play.google.com/store/apps/details?id=es.manifold.sidedeck"><img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="80"></a>
 </p>
 
 Android DJ deck for local files and a Subsonic music server. Landscape dual
