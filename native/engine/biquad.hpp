@@ -25,69 +25,6 @@ struct Biquad {
     reset();
   }
 
-  void lowShelf(float sampleRate, float freq, float gainDb) {
-    const float A = std::pow(10.0f, gainDb / 40.0f);
-    const float w0 = 2.0f * 3.14159265358979323846f * freq / sampleRate;
-    const float cosw = std::cos(w0);
-    const float sinw = std::sin(w0);
-    const float S = 1.0f;
-    const float alpha =
-        sinw / 2.0f * std::sqrt((A + 1.0f / A) * (1.0f / S - 1.0f) + 2.0f);
-    const float twoSqrtA = 2.0f * std::sqrt(A) * alpha;
-    const float b0n = A * ((A + 1.0f) - (A - 1.0f) * cosw + twoSqrtA);
-    const float b1n = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw);
-    const float b2n = A * ((A + 1.0f) - (A - 1.0f) * cosw - twoSqrtA);
-    const float a0n = (A + 1.0f) + (A - 1.0f) * cosw + twoSqrtA;
-    const float a1n = -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw);
-    const float a2n = (A + 1.0f) + (A - 1.0f) * cosw - twoSqrtA;
-    b0 = b0n / a0n;
-    b1 = b1n / a0n;
-    b2 = b2n / a0n;
-    a1 = a1n / a0n;
-    a2 = a2n / a0n;
-  }
-
-  void peaking(float sampleRate, float freq, float q, float gainDb) {
-    const float A = std::pow(10.0f, gainDb / 40.0f);
-    const float w0 = 2.0f * 3.14159265358979323846f * freq / sampleRate;
-    const float cosw = std::cos(w0);
-    const float sinw = std::sin(w0);
-    const float alpha = sinw / (2.0f * q);
-    const float b0n = 1.0f + alpha * A;
-    const float b1n = -2.0f * cosw;
-    const float b2n = 1.0f - alpha * A;
-    const float a0n = 1.0f + alpha / A;
-    const float a1n = -2.0f * cosw;
-    const float a2n = 1.0f - alpha / A;
-    b0 = b0n / a0n;
-    b1 = b1n / a0n;
-    b2 = b2n / a0n;
-    a1 = a1n / a0n;
-    a2 = a2n / a0n;
-  }
-
-  void highShelf(float sampleRate, float freq, float gainDb) {
-    const float A = std::pow(10.0f, gainDb / 40.0f);
-    const float w0 = 2.0f * 3.14159265358979323846f * freq / sampleRate;
-    const float cosw = std::cos(w0);
-    const float sinw = std::sin(w0);
-    const float S = 1.0f;
-    const float alpha =
-        sinw / 2.0f * std::sqrt((A + 1.0f / A) * (1.0f / S - 1.0f) + 2.0f);
-    const float twoSqrtA = 2.0f * std::sqrt(A) * alpha;
-    const float b0n = A * ((A + 1.0f) + (A - 1.0f) * cosw + twoSqrtA);
-    const float b1n = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw);
-    const float b2n = A * ((A + 1.0f) + (A - 1.0f) * cosw - twoSqrtA);
-    const float a0n = (A + 1.0f) - (A - 1.0f) * cosw + twoSqrtA;
-    const float a1n = 2.0f * ((A - 1.0f) - (A + 1.0f) * cosw);
-    const float a2n = (A + 1.0f) - (A - 1.0f) * cosw - twoSqrtA;
-    b0 = b0n / a0n;
-    b1 = b1n / a0n;
-    b2 = b2n / a0n;
-    a1 = a1n / a0n;
-    a2 = a2n / a0n;
-  }
-
   void lowPass(float sampleRate, float freq, float q) {
     const float w0 = 2.0f * 3.14159265358979323846f * freq / sampleRate;
     const float cosw = std::cos(w0);
@@ -123,4 +60,22 @@ struct Biquad {
     a1 = a1n / a0n;
     a2 = a2n / a0n;
   }
+};
+
+// Two cascaded Butterworth biquads = Linkwitz-Riley 4th order (-24 dB/oct).
+struct LR4 {
+  Biquad a, b;
+  static constexpr float kButterQ = 0.707106781f;
+
+  void lowPass(float sampleRate, float freq) {
+    a.lowPass(sampleRate, freq, kButterQ);
+    b.lowPass(sampleRate, freq, kButterQ);
+  }
+
+  void highPass(float sampleRate, float freq) {
+    a.highPass(sampleRate, freq, kButterQ);
+    b.highPass(sampleRate, freq, kButterQ);
+  }
+
+  float process(float x) { return b.process(a.process(x)); }
 };

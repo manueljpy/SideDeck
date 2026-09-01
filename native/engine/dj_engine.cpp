@@ -38,9 +38,38 @@ constexpr int kWaveformBins = 32768;
 constexpr int kHotCues = 4;
 constexpr int kMaxCallbackFrames = 2048;
 constexpr int kMaxStretchInFrames = kMaxCallbackFrames * 2 + 256;
-constexpr float kPi = 3.14159265358979323846f;
+
+constexpr float kEqLowHz = 246.0f;
+constexpr float kEqHighHz = 2484.0f;
+constexpr float kFilterMinHz = 13.0f;
+constexpr float kFilterMaxHz = 22050.0f;
+constexpr float kXfaderTransform = 1.0f;
 
 inline float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
+
+// Isolator fader: 0 = kill, 1 = unity, 4 = +12 dB.
+inline float eqBandGain(float db) {
+  if (db >= 0.0f) {
+    return std::pow(10.0f, db / 20.0f);
+  }
+  return std::max(0.0f, 1.0f + db / 12.0f);
+}
+
+// Club mixer xfader. x: 0 = A, 1 = B. Assigned deck stays at unity through
+// center; the other side is 1 - |2x-1|^transform.
+inline void xfaderGains(float x, float& gainA, float& gainB) {
+  const float pos = 2.0f * clamp01(x) - 1.0f;
+  if (pos < 0.0f) {
+    gainA = 1.0f;
+    gainB = 1.0f - std::pow(-pos, kXfaderTransform);
+  } else if (pos > 0.0f) {
+    gainA = 1.0f - std::pow(pos, kXfaderTransform);
+    gainB = 1.0f;
+  } else {
+    gainA = 1.0f;
+    gainB = 1.0f;
+  }
+}
 
 struct Deck {
   std::mutex mutex;
@@ -56,6 +85,7 @@ struct Deck {
   bool keylock = true;
   float filter = 0.0f; // -1 HPF .. 0 flat .. +1 LPF
   float eqLow = 0, eqMid = 0, eqHigh = 0;
+  float eqLowG = 1, eqMidG = 1, eqHighG = 1;
   double cuePoint = 0.0;
   double hotcues[kHotCues] = {-1, -1, -1, -1};
   bool loopEnabled = false;
@@ -70,7 +100,10 @@ struct Deck {
   std::vector<float> waveMin;
   std::vector<float> waveMax;
 
-  Biquad lowL, lowR, midL, midR, highL, highR;
+  LR4 eqLoL, eqLoR;         // LPF @ 246 Hz
+  LR4 eqMidHpL, eqMidHpR;   // HPF @ 246 Hz
+  LR4 eqMidLpL, eqMidLpR;   // LPF @ 2484 Hz
+  LR4 eqHiL, eqHiR;         // HPF @ 2484 Hz
   Biquad filtL, filtR;
 
   // Signalsmith Stretch: tempo change with pitch held (keylock).
@@ -143,27 +176,36 @@ struct Deck {
   }
 
   void rebuildEq(float sr) {
-    lowL.lowShelf(sr, 250.0f, eqLow);
-    lowR.lowShelf(sr, 250.0f, eqLow);
-    midL.peaking(sr, 1000.0f, 0.7f, eqMid);
-    midR.peaking(sr, 1000.0f, 0.7f, eqMid);
-    highL.highShelf(sr, 4000.0f, eqHigh);
-    highR.highShelf(sr, 4000.0f, eqHigh);
+    eqLoL.lowPass(sr, kEqLowHz);
+    eqLoR.lowPass(sr, kEqLowHz);
+    eqMidHpL.highPass(sr, kEqLowHz);
+    eqMidHpR.highPass(sr, kEqLowHz);
+    eqMidLpL.lowPass(sr, kEqHighHz);
+    eqMidLpR.lowPass(sr, kEqHighHz);
+    eqHiL.highPass(sr, kEqHighHz);
+    eqHiR.highPass(sr, kEqHighHz);
+    eqLowG = eqBandGain(eqLow);
+    eqMidG = eqBandGain(eqMid);
+    eqHighG = eqBandGain(eqHigh);
   }
 
   void rebuildFilter(float sr) {
-    if (filter > 0.02f) {
-      const float freq = 20000.0f * std::pow(0.05f, filter);
-      filtL.lowPass(sr, std::max(40.0f, freq), 0.707f);
-      filtR.lowPass(sr, std::max(40.0f, freq), 0.707f);
-    } else if (filter < -0.02f) {
-      const float amt = -filter;
-      const float freq = 40.0f * std::pow(400.0f, amt);
-      filtL.highPass(sr, std::min(18000.0f, freq), 0.707f);
-      filtR.highPass(sr, std::min(18000.0f, freq), 0.707f);
-    } else {
+    const float mag = std::fabs(filter);
+    if (mag <= 0.02f) {
       filtL.identity();
       filtR.identity();
+      return;
+    }
+    const float t = (mag - 0.02f) / 0.98f;
+    const float fMax = std::min(kFilterMaxHz, std::max(100.0f, sr * 0.45f));
+    if (filter > 0.0f) {
+      const float freq = fMax * std::pow(kFilterMinHz / fMax, t);
+      filtL.lowPass(sr, freq, LR4::kButterQ);
+      filtR.lowPass(sr, freq, LR4::kButterQ);
+    } else {
+      const float freq = kFilterMinHz * std::pow(fMax / kFilterMinHz, t);
+      filtL.highPass(sr, freq, LR4::kButterQ);
+      filtR.highPass(sr, freq, LR4::kButterQ);
     }
   }
 
@@ -421,8 +463,14 @@ struct Engine : public oboe::AudioStreamDataCallback,
     }
 
     auto applyFx = [&](float& l, float& r) {
-      l = d.highL.process(d.midL.process(d.lowL.process(l)));
-      r = d.highR.process(d.midR.process(d.lowR.process(r)));
+      const float loL = d.eqLoL.process(l);
+      const float midL = d.eqMidLpL.process(d.eqMidHpL.process(l));
+      const float hiL = d.eqHiL.process(l);
+      l = loL * d.eqLowG + midL * d.eqMidG + hiL * d.eqHighG;
+      const float loR = d.eqLoR.process(r);
+      const float midR = d.eqMidLpR.process(d.eqMidHpR.process(r));
+      const float hiR = d.eqHiR.process(r);
+      r = loR * d.eqLowG + midR * d.eqMidG + hiR * d.eqHighG;
       l = d.filtL.process(l);
       r = d.filtR.process(r);
       const float g = d.gain * d.fader;
@@ -518,8 +566,9 @@ struct Engine : public oboe::AudioStreamDataCallback,
     renderDeck(decks[1], mixBL.data(), mixBR.data(), n);
 
     const float x = xfader.load();
-    const float gainA = std::cos(x * 0.5f * kPi);
-    const float gainB = std::sin(x * 0.5f * kPi);
+    float gainA = 1.0f;
+    float gainB = 1.0f;
+    xfaderGains(x, gainA, gainB);
     const float m = master.load();
     const bool split = outputMode.load() == 1 && channels >= 4;
 
