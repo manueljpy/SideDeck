@@ -35,9 +35,8 @@ qm-dsp (GNU General Public License 2.0 or later)
   key detection (GetKeyMode, Chromagram, ConstantQ, Decimator).
   Bundled kissfft is BSD-3-Clause (see third_party/qm-dsp/ext/kissfft).
 
-Mixxx BeatUtils (GNU General Public License 2.0 or later)
+Mixxx (GNU General Public License 2.0 or later)
   Copyright (C) Mixxx developers
-  native/engine/beat_utils.hpp
-  Ported from Mixxx src/track/beatutils.cpp
   https://github.com/mixxxdj/mixxx
-  Constant-tempo ironing / BPM from Queen Mary beats.
+  native/engine/beat_utils.hpp (from src/track/beatutils.cpp)
+  native/engine/dj_engine.cpp (xfader, isolator, filter)
