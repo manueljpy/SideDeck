@@ -77,5 +77,10 @@ struct LR4 {
     b.highPass(sampleRate, freq, kButterQ);
   }
 
+  void reset() {
+    a.reset();
+    b.reset();
+  }
+
   float process(float x) { return b.process(a.process(x)); }
 };

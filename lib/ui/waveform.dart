@@ -13,6 +13,7 @@ class WaveformPainter extends CustomPainter {
     required this.beatOffset,
     required this.bpm,
     required this.color,
+    this.rate = 1,
     this.loopEnabled = false,
     this.loopStart = 0,
     this.loopEnd = 0,
@@ -27,6 +28,9 @@ class WaveformPainter extends CustomPainter {
   final double beatOffset;
   final double bpm;
   final Color color;
+  /// Playback rate (file seconds per heard second). Zooms the scrolling
+  /// waveform in heard-time so synced decks share a beat grid.
+  final double rate;
   final bool loopEnabled;
   final double loopStart;
   final double loopEnd;
@@ -52,11 +56,13 @@ class WaveformPainter extends CustomPainter {
     final waveH = size.height - overviewH;
     final mid = waveTop + waveH / 2;
 
-    final halfWin = zoomWindowSec / 2;
-    // Always-centered playhead (empty pad before 0 / after end).
+    final playRate = rate.clamp(0.5, 2.0);
+    // Heard-time window (what you hear), mapped back to file seconds.
+    // rate > 1 compresses the wave; rate < 1 stretches it.
+    final halfWin = (zoomWindowSec / 2) * playRate;
     final viewStart = position - halfWin;
     final viewEnd = position + halfWin;
-    final viewDur = zoomWindowSec;
+    final viewDur = zoomWindowSec * playRate;
 
     double xForTime(double t) => ((t - viewStart) / viewDur) * size.width;
 
@@ -326,6 +332,7 @@ class WaveformPainter extends CustomPainter {
         oldDelegate.max != max ||
         oldDelegate.beatOffset != beatOffset ||
         oldDelegate.bpm != bpm ||
+        oldDelegate.rate != rate ||
         oldDelegate.loopEnabled != loopEnabled ||
         oldDelegate.loopStart != loopStart ||
         oldDelegate.loopEnd != loopEnd ||
@@ -343,6 +350,7 @@ class WaveformView extends StatelessWidget {
     required this.color,
     this.beatOffset = 0,
     this.bpm = 0,
+    this.rate = 1,
     this.loopEnabled = false,
     this.loopStart = 0,
     this.loopEnd = 0,
@@ -355,6 +363,7 @@ class WaveformView extends StatelessWidget {
   final double duration;
   final double beatOffset;
   final double bpm;
+  final double rate;
   final Color color;
   final bool loopEnabled;
   final double loopStart;
@@ -379,6 +388,7 @@ class WaveformView extends StatelessWidget {
             duration: duration,
             beatOffset: beatOffset,
             bpm: bpm,
+            rate: rate,
             color: color,
             loopEnabled: loopEnabled,
             loopStart: loopStart,
@@ -394,7 +404,9 @@ class WaveformView extends StatelessWidget {
             if (d.localPosition.dy < WaveformPainter.overviewH) return;
             final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
             if ((nx - 0.5).abs() > WaveformPainter.jumpHalf) return;
-            final t = position - zoom / 2 + nx * zoom;
+            final playRate = rate.clamp(0.5, 2.0);
+            final heard = (nx - 0.5) * zoom;
+            final t = position + heard * playRate;
             onSeek!(t.clamp(0.0, duration).toDouble());
           },
           child: paint,

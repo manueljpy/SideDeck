@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -26,6 +27,8 @@
 #include "dr_mp3.h"
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
+
+#include "chunk_cache.hpp"
 
 #include <android/log.h>
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "sidedeck", __VA_ARGS__)
@@ -73,7 +76,9 @@ inline void xfaderGains(float x, float& gainA, float& gainB) {
 
 struct Deck {
   std::mutex mutex;
-  std::vector<float> pcm; // interleaved stereo at engine sample rate
+  ChunkCache cache;
+  std::string path;
+  int64_t totalFrames = 0;
   int sampleRate = 48000;
   int channels = 2;
   double playhead = 0.0; // audible file position in frames (fractional)
@@ -96,6 +101,10 @@ struct Deck {
   float bpm = 120.0f;
   int key = -1;
   float beatOffset = 0.0f;
+  std::atomic<int64_t> pendingJump{-1};
+  std::atomic<bool> pendingLoopShift{false};
+  std::atomic<double> pendingLoopDelta{0.0};
+  std::vector<float> jumpXfL, jumpXfR;
 
   std::vector<float> waveMin;
   std::vector<float> waveMax;
@@ -116,17 +125,63 @@ struct Deck {
   double stretchRead = 0.0;
   std::vector<float> stretchInL, stretchInR, stretchOutL, stretchOutR;
 
-  void readPcm(double pos, float& l, float& r) const {
-    const int totalFrames = (int)(pcm.size() / 2);
-    if (pcm.empty() || pos < 0.0 || pos >= (double)totalFrames - 1.0) {
-      l = r = 0.0f;
+  void readPcm(double pos, float& l, float& r) {
+    cache.readPcm(pos, l, r);
+  }
+
+  void hintHot() {
+    const int sr = std::max(1, sampleRate);
+    cache.setHotFrame((int64_t)playhead);
+    cache.hintEngineFrames((int64_t)playhead, sr);  // ~1 s ahead of playhead
+    cache.hintEngineFrames((int64_t)(cuePoint * (double)sr), ChunkCache::kChunkFrames);
+    if (loopEnabled) {
+      cache.hintEngineFrames((int64_t)(loopStart * (double)sr), ChunkCache::kChunkFrames * 2);
+      const int64_t loopEndFrame = (int64_t)(loopEnd * (double)sr);
+      cache.hintEngineFrames(loopEndFrame - ChunkCache::kChunkFrames, ChunkCache::kChunkFrames * 2);
+    }
+  }
+
+  void prefetchJump(int64_t destFrame) {
+    cache.jumpTo(destFrame);
+    const int sr = std::max(1, sampleRate);
+    cache.hintEngineFrames((int64_t)(cuePoint * (double)sr), ChunkCache::kChunkFrames);
+    if (loopEnabled) {
+      cache.hintEngineFrames((int64_t)(loopStart * (double)sr), ChunkCache::kChunkFrames * 2);
+      const int64_t loopEndFrame = (int64_t)(loopEnd * (double)sr);
+      cache.hintEngineFrames(loopEndFrame - ChunkCache::kChunkFrames, ChunkCache::kChunkFrames * 2);
+    }
+  }
+
+  int64_t jumpAheadFrames() const {
+    int64_t ahead = ChunkCache::kChunkFrames * 3;
+    if (stretcherReady) {
+      ahead = std::max(ahead,
+                       (int64_t)stretcher.outputSeekLength(2.0f) + ChunkCache::kChunkFrames);
+    }
+    return ahead;
+  }
+
+  // Prefetch dest, then queue the snap for the audio thread. Do not hold
+  // Deck::mutex across the wait (callback try_lock would mute).
+  void commitJumpTo(double newPlayhead, std::unique_lock<std::mutex>& lock,
+                    bool shiftLoop = false, double loopDelta = 0.0) {
+    prefetchJump((int64_t)newPlayhead);
+    const int64_t ahead = jumpAheadFrames();
+    const bool wasPlaying = playing;
+    lock.unlock();
+    cache.waitAround((int64_t)newPlayhead, ahead, 400);
+    if (shiftLoop) {
+      pendingLoopDelta.store(loopDelta);
+      pendingLoopShift.store(true);
+    } else {
+      pendingLoopShift.store(false);
+    }
+    if (!wasPlaying) {
+      lock.lock();
+      applyJump(newPlayhead);
       return;
     }
-    const int i0 = (int)pos;
-    const int i1 = std::min(i0 + 1, totalFrames - 1);
-    const float frac = (float)(pos - (double)i0);
-    l = pcm[i0 * 2] * (1.0f - frac) + pcm[i1 * 2] * frac;
-    r = pcm[i0 * 2 + 1] * (1.0f - frac) + pcm[i1 * 2 + 1] * frac;
+    pendingJump.store((int64_t)newPlayhead);
   }
 
   void ensureStretcher() {
@@ -173,6 +228,28 @@ struct Deck {
     stretcher.outputSeek(ptrs, need);
     stretchRead = playhead + (double)need;
     stretchPrimed = true;
+  }
+
+  void resetFilters() {
+    eqLoL.reset();
+    eqLoR.reset();
+    eqMidHpL.reset();
+    eqMidHpR.reset();
+    eqMidLpL.reset();
+    eqMidLpR.reset();
+    eqHiL.reset();
+    eqHiR.reset();
+    filtL.reset();
+    filtR.reset();
+  }
+
+  void applyJump(double newPlayhead) {
+    playhead = newPlayhead;
+    if (pendingLoopShift.exchange(false)) {
+      shiftLoop(pendingLoopDelta.load());
+    }
+    flushStretcher();
+    resetFilters();
   }
 
   void rebuildEq(float sr) {
@@ -337,25 +414,52 @@ struct Engine : public oboe::AudioStreamDataCallback,
       d.stretchInR.assign((size_t)kMaxStretchInFrames, 0.0f);
       d.stretchOutL.assign((size_t)kMaxCallbackFrames, 0.0f);
       d.stretchOutR.assign((size_t)kMaxCallbackFrames, 0.0f);
+      d.jumpXfL.assign((size_t)kMaxCallbackFrames, 0.0f);
+      d.jumpXfR.assign((size_t)kMaxCallbackFrames, 0.0f);
     }
+  }
+
+  ~Engine() {
+    alive.store(false);
+    closeStream();
+    decks[0].cache.stop();
+    decks[1].cache.stop();
   }
 
   void applyLoadedDeckSampleRate(int newSr) {
     for (auto& d : decks) {
-      std::lock_guard<std::mutex> dl(d.mutex);
-      if (d.loaded && !d.pcm.empty() && d.sampleRate > 0 && d.sampleRate != newSr) {
-        const double scale = (double)newSr / (double)d.sampleRate;
-        d.pcm = resampleStereo(d.pcm, d.sampleRate, newSr);
-        d.playhead *= scale;
+      std::string path;
+      double playhead = 0;
+      bool loaded = false;
+      int oldSr = 0;
+      {
+        std::lock_guard<std::mutex> dl(d.mutex);
+        loaded = d.loaded;
+        path = d.path;
+        playhead = d.playhead;
+        oldSr = d.sampleRate;
+      }
+      if (loaded && !path.empty() && oldSr > 0 && oldSr != newSr) {
+        const double scale = (double)newSr / (double)oldSr;
+        d.cache.open(path.c_str(), newSr);
+        std::lock_guard<std::mutex> dl(d.mutex);
+        d.playhead = playhead * scale;
         d.sampleRate = newSr;
+        d.totalFrames = d.cache.engineFrames();
         d.flushStretcher();
         d.stretcherReady = false;
         d.stretcherSr = 0;
-      } else if (!d.loaded) {
-        d.sampleRate = newSr;
+        d.hintHot();
+        d.rebuildEq((float)newSr);
+        d.rebuildFilter((float)newSr);
+      } else {
+        std::lock_guard<std::mutex> dl(d.mutex);
+        if (!d.loaded) {
+          d.sampleRate = newSr;
+        }
+        d.rebuildEq((float)newSr);
+        d.rebuildFilter((float)newSr);
       }
-      d.rebuildEq((float)newSr);
-      d.rebuildFilter((float)newSr);
     }
   }
 
@@ -446,21 +550,47 @@ struct Engine : public oboe::AudioStreamDataCallback,
       std::fill(right, right + frames, 0.0f);
       return;
     }
-    if (!d.loaded || d.pcm.empty()) {
+    if (!d.loaded || d.totalFrames < 2) {
       std::fill(left, left + frames, 0.0f);
       std::fill(right, right + frames, 0.0f);
       return;
     }
 
-    const int totalFrames = (int)(d.pcm.size() / 2);
-    const float rate = d.rate;
-    const bool useKeylock = d.keylock && std::fabs(rate - 1.0f) > 0.002f;
-
+    const int64_t jumpTo = d.pendingJump.exchange(-1);
+    if (jumpTo >= 0 && d.playing) {
+      // One more buffer at the old playhead, then linear-crossfade into
+      // the seek target.
+      if ((int)d.jumpXfL.size() < frames) {
+        d.jumpXfL.assign((size_t)frames, 0.0f);
+        d.jumpXfR.assign((size_t)frames, 0.0f);
+      }
+      renderPlay(d, d.jumpXfL.data(), d.jumpXfR.data(), frames);
+      d.applyJump((double)jumpTo);
+      d.playing = true;
+      renderPlay(d, left, right, frames);
+      const float denom = (float)std::max(1, frames - 1);
+      for (int i = 0; i < frames; ++i) {
+        const float t = (float)i / denom;
+        left[i] = d.jumpXfL[i] * (1.0f - t) + left[i] * t;
+        right[i] = d.jumpXfR[i] * (1.0f - t) + right[i] * t;
+      }
+      return;
+    }
+    if (jumpTo >= 0) {
+      d.applyJump((double)jumpTo);
+    }
     if (!d.playing) {
       std::fill(left, left + frames, 0.0f);
       std::fill(right, right + frames, 0.0f);
       return;
     }
+    renderPlay(d, left, right, frames);
+  }
+
+  void renderPlay(Deck& d, float* left, float* right, int frames) {
+    const int totalFrames = (int)d.totalFrames;
+    const float rate = d.rate;
+    const bool useKeylock = d.keylock && std::fabs(rate - 1.0f) > 0.002f;
 
     auto applyFx = [&](float& l, float& r) {
       const float loL = d.eqLoL.process(l);
@@ -524,6 +654,7 @@ struct Engine : public oboe::AudioStreamDataCallback,
         d.playing = false;
         d.playhead = (double)std::max(0, totalFrames - 1);
       }
+      d.hintHot();
       return;
     }
 
@@ -545,16 +676,14 @@ struct Engine : public oboe::AudioStreamDataCallback,
         continue;
       }
 
-      const int i0 = (int)d.playhead;
-      const int i1 = std::min(i0 + 1, totalFrames - 1);
-      const float frac = (float)(d.playhead - (double)i0);
-      float l = d.pcm[i0 * 2] * (1.0f - frac) + d.pcm[i1 * 2] * frac;
-      float r = d.pcm[i0 * 2 + 1] * (1.0f - frac) + d.pcm[i1 * 2 + 1] * frac;
+      float l = 0, r = 0;
+      d.readPcm(d.playhead, l, r);
       applyFx(l, r);
       left[i] = l;
       right[i] = r;
       d.playhead += (double)rate;
     }
+    d.hintHot();
   }
 
   void renderInterleaved(float* out, int frames, int channels) {
@@ -879,10 +1008,6 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
   }
   auto* e = asEngine(engine);
   const int sr = e->engineSampleRate.load();
-  auto pcm = Engine::decodeFile(path, sr);
-  if (pcm.empty()) {
-    return 0;
-  }
 
   AnalysisResult analysis;
   if (bpm > 1.0f) {
@@ -891,21 +1016,47 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
     analysis.beatOffsetSec = beat_offset;
   } else {
     const id3_meta::Tags tags = id3_meta::read(path);
-    analysis = analyzePlaybackPcm(pcm.data(), (int)(pcm.size() / 2), 2, (float)sr, tags.bpm, tags.key);
+    auto prefix = Engine::decodeAnalyzeMono(path, (int)analyze_detail::kAnalyzeSr);
+    if (prefix.empty()) {
+      return 0;
+    }
+    analysis =
+        analyzeTrack(prefix.data(), (int)prefix.size(), 1, analyze_detail::kAnalyzeSr, tags.bpm,
+                     tags.key);
   }
 
-  std::vector<float> wmin, wmax;
-  fillWaveform(pcm, wmin, wmax);
-
   Deck& d = e->decks[deck];
+  {
+    std::lock_guard<std::mutex> lock(d.mutex);
+    d.playing = false;
+    d.loaded = false;
+  }
+  if (!d.cache.open(path, sr)) {
+    return 0;
+  }
+  d.cache.hintEngineFrames(0, (int64_t)sr * 2);
+
+  std::vector<float> wmin, wmax;
+  {
+    StreamingDecoder scan;
+    if (!scan.open(path)) {
+      d.cache.stop();
+      return 0;
+    }
+    scanWaveform(scan, kWaveformBins, wmin, wmax);
+  }
+
+  d.cache.waitChunk(0, 2500);
+
   std::lock_guard<std::mutex> lock(d.mutex);
-  d.pcm = std::move(pcm);
+  d.path = path;
   d.sampleRate = sr;
   d.channels = 2;
+  d.totalFrames = d.cache.engineFrames();
   d.playhead = 0;
   d.cuePoint = 0;
   d.playing = false;
-  d.loaded = true;
+  d.loaded = d.totalFrames > 1;
   d.bpm = analysis.bpm;
   d.key = analysis.key;
   d.beatOffset = analysis.beatOffsetSec;
@@ -919,8 +1070,9 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
   d.loopEnabled = false;
   d.rebuildEq((float)sr);
   d.rebuildFilter((float)sr);
-  LOGI("loaded deck %d frames=%zu bpm=%.2f key=%d", deck, d.pcm.size() / 2, d.bpm, d.key);
-  return 1;
+  d.hintHot();
+  LOGI("loaded deck %d frames=%lld bpm=%.2f key=%d", deck, (long long)d.totalFrames, d.bpm, d.key);
+  return d.loaded ? 1 : 0;
 }
 
 int dj_analyze_file(const char* path, float* bpm, int* key, float* beat_offset) {
@@ -958,12 +1110,16 @@ void dj_unload(DjEngine engine, int deck) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
-  d.pcm.clear();
-  d.loaded = false;
-  d.playing = false;
-  d.waveMin.clear();
-  d.waveMax.clear();
+  {
+    std::lock_guard<std::mutex> lock(d.mutex);
+    d.loaded = false;
+    d.playing = false;
+    d.waveMin.clear();
+    d.waveMax.clear();
+    d.totalFrames = 0;
+    d.path.clear();
+  }
+  d.cache.stop();
 }
 
 void dj_play(DjEngine engine, int deck, int playing) {
@@ -980,10 +1136,11 @@ void dj_seek(DjEngine engine, int deck, double seconds) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
-  const double maxFrame = d.pcm.empty() ? 0.0 : (double)(d.pcm.size() / 2) - 1.0;
-  d.playhead = std::max(0.0, std::min(seconds * (double)std::max(1, d.sampleRate), maxFrame));
-  d.flushStretcher();
+  std::unique_lock<std::mutex> lock(d.mutex);
+  const double maxFrame = d.totalFrames < 2 ? 0.0 : (double)d.totalFrames - 1.0;
+  const double dest =
+      std::max(0.0, std::min(seconds * (double)std::max(1, d.sampleRate), maxFrame));
+  d.commitJumpTo(dest, lock);
 }
 
 void dj_set_cue(DjEngine engine, int deck) {
@@ -1000,12 +1157,8 @@ void dj_jump_cue(DjEngine engine, int deck) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
-  d.playhead = d.cuePoint * (double)d.sampleRate;
-  d.flushStretcher();
-  if (!d.playing) {
-    // Cue preview: stay paused at cue.
-  }
+  std::unique_lock<std::mutex> lock(d.mutex);
+  d.commitJumpTo(d.cuePoint * (double)d.sampleRate, lock);
 }
 
 double dj_position(DjEngine engine, int deck) {
@@ -1023,7 +1176,8 @@ double dj_duration(DjEngine engine, int deck) {
   }
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
-  return d.pcm.empty() ? 0.0 : (d.pcm.size() / 2.0) / (double)std::max(1, d.sampleRate);
+  return d.totalFrames < 2 ? 0.0
+                           : (double)d.totalFrames / (double)std::max(1, d.sampleRate);
 }
 
 int dj_playing(DjEngine engine, int deck) {
@@ -1203,10 +1357,9 @@ void dj_jump_hotcue(DjEngine engine, int deck, int index) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
+  std::unique_lock<std::mutex> lock(d.mutex);
   if (d.hotcues[index] >= 0) {
-    d.playhead = d.hotcues[index] * (double)d.sampleRate;
-    d.flushStretcher();
+    d.commitJumpTo(d.hotcues[index] * (double)d.sampleRate, lock);
   }
 }
 
@@ -1233,13 +1386,10 @@ void dj_beat_jump(DjEngine engine, int deck, int beats) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
+  std::unique_lock<std::mutex> lock(d.mutex);
   const double delta = (60.0 / (double)std::max(1.0f, d.bpm)) * (double)beats;
-  d.playhead = std::max(0.0, d.playhead + delta * (double)d.sampleRate);
-  if (d.loopEnabled) {
-    d.shiftLoop(delta);
-  }
-  d.flushStretcher();
+  const double dest = std::max(0.0, d.playhead + delta * (double)d.sampleRate);
+  d.commitJumpTo(dest, lock, d.loopEnabled, delta);
 }
 
 void dj_sync_to(DjEngine engine, int slave, int master) {
