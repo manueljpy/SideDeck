@@ -155,33 +155,6 @@ struct ChunkCache {
     }
   }
 
-  bool waitAround(int64_t frame, int64_t count, int timeoutMs) {
-    if (count < kChunkFrames) {
-      count = kChunkFrames;
-    }
-    hintEngineFrames(frame - kChunkFrames / 4, count + kChunkFrames, true);
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    const int64_t total = engineFrames_.load();
-    const int64_t a = std::max<int64_t>(0, frame);
-    const int64_t b = std::min(total, frame + count);
-    if (b <= a) {
-      return true;
-    }
-    const int first = (int)(a / kChunkFrames);
-    const int last = (int)((b - 1) / kChunkFrames);
-    for (int i = first; i <= last; ++i) {
-      const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            deadline - std::chrono::steady_clock::now())
-                            .count();
-      if (left <= 0) {
-        break;
-      }
-      waitChunk(i, (int)left);
-    }
-    return hasChunk(first);
-  }
-
   bool waitChunk(int chunkIndex, int timeoutMs) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
@@ -374,28 +347,28 @@ struct ChunkCache {
     constexpr int64_t kMp3Preroll = 29 * 1152;
     const int64_t maxSkip = dec.kind == StreamingDecoder::Kind::Mp3 ? kMp3Preroll : (int64_t)8192;
     decoderNative = (int64_t)dec.tell();
-    if (decoderNative == nativeStart) {
-      // already there
-    } else if (decoderNative >= 0 && decoderNative < nativeStart &&
-               nativeStart - decoderNative <= maxSkip) {
-      std::vector<float> skip((size_t)(nativeStart - decoderNative) * 2);
-      dec.readStereo(skip.data(), (uint64_t)(nativeStart - decoderNative));
-    } else if (decoderNative > nativeStart && decoderNative - nativeStart <= 8) {
-      if (!dec.seek((uint64_t)nativeStart)) {
-        return false;
-      }
-    } else {
-      const int64_t restart =
-          dec.kind == StreamingDecoder::Kind::Mp3
-              ? std::max<int64_t>(0, nativeStart - kMp3Preroll)
-              : nativeStart;
-      if (!dec.seek((uint64_t)restart)) {
-        return false;
-      }
-      const int64_t skipN = nativeStart - restart;
-      if (skipN > 0) {
-        std::vector<float> skip((size_t)skipN * 2);
-        dec.readStereo(skip.data(), (uint64_t)skipN);
+    if (decoderNative != nativeStart) {
+      if (decoderNative >= 0 && decoderNative < nativeStart &&
+          nativeStart - decoderNative <= maxSkip) {
+        std::vector<float> skip((size_t)(nativeStart - decoderNative) * 2);
+        dec.readStereo(skip.data(), (uint64_t)(nativeStart - decoderNative));
+      } else if (decoderNative > nativeStart && decoderNative - nativeStart <= 8) {
+        if (!dec.seek((uint64_t)nativeStart)) {
+          return false;
+        }
+      } else {
+        const int64_t restart =
+            dec.kind == StreamingDecoder::Kind::Mp3
+                ? std::max<int64_t>(0, nativeStart - kMp3Preroll)
+                : nativeStart;
+        if (!dec.seek((uint64_t)restart)) {
+          return false;
+        }
+        const int64_t skipN = nativeStart - restart;
+        if (skipN > 0) {
+          std::vector<float> skip((size_t)skipN * 2);
+          dec.readStereo(skip.data(), (uint64_t)skipN);
+        }
       }
     }
     decoderNative = (int64_t)dec.tell();
