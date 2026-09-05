@@ -80,6 +80,9 @@ class DjController extends ChangeNotifier {
       if (!d.loaded || !d.playing) continue;
       d.position = _engine.position(i);
       d.playing = _engine.isPlaying(i);
+      if (d.loopEnabled) {
+        _readLoop(i);
+      }
       dirty = true;
     }
     if (dirty) notifyListeners();
