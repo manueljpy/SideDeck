@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sidedeck/engine/music_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 
@@ -111,11 +112,6 @@ class SubsonicClient {
     return Uri.parse('$root/rest/$endpoint').replace(queryParameters: params);
   }
 
-  static bool _isNativeDecodable(String suffix) {
-    final s = suffix.toLowerCase();
-    return s == 'mp3' || s == 'wav' || s == 'wave';
-  }
-
   static String? _sniffKind(List<int> bytes) {
     if (bytes.length < 12) return 'empty';
     if (bytes[0] == 0x7B || bytes[0] == 0x3C) return 'error';
@@ -195,8 +191,9 @@ class SubsonicClient {
       await cacheDir.create(recursive: true);
     }
     final safe = track.id.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-    final ext = track.suffix.toLowerCase() == 'wav' || track.suffix.toLowerCase() == 'wave'
-        ? 'wav'
+    final suffix = track.suffix.toLowerCase();
+    final ext = isNativeAudioExtension(suffix)
+        ? (suffix == 'wave' ? 'wav' : suffix)
         : 'mp3';
     return p.join(cacheDir.path, '$safe.$ext');
   }
@@ -218,7 +215,7 @@ class SubsonicClient {
       return file.path;
     }
 
-    final native = _isNativeDecodable(track.suffix);
+    final native = isNativeAudioExtension(track.suffix);
     final uri = native
         ? _mediaUri('download.view', {'id': track.id})
         : _mediaUri('stream.view', {
@@ -238,9 +235,9 @@ class SubsonicClient {
     if (kind == 'error') {
       throw Exception('Server returned an error instead of audio');
     }
-    if (kind == 'flac' || kind == 'ogg' || kind == 'm4a') {
+    if (kind == 'm4a') {
       throw Exception(
-        'Got $kind audio. SideDeck needs MP3 or WAV — enable MP3 transcoding (ffmpeg) on the server.',
+        'Got $kind audio. SideDeck needs MP3, WAV, FLAC, or Opus — enable MP3 transcoding (ffmpeg) on the server.',
       );
     }
     await file.writeAsBytes(bytes, flush: true);

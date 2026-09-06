@@ -13,10 +13,25 @@ Oboe (Apache License 2.0)
   https://github.com/google/oboe
   Android audio I/O
 
-dr_libs — dr_mp3 / dr_wav (public domain / MIT-0)
+dr_libs — dr_mp3 / dr_wav / dr_flac (public domain / MIT-0)
   third_party/dr_libs
   https://github.com/mackron/dr_libs
-  MP3 and WAV decode
+  MP3, WAV, and FLAC decode
+
+libogg (BSD-style)
+  third_party/ogg
+  https://github.com/xiph/ogg
+  Ogg container demux for Opus
+
+libopus (BSD-style)
+  third_party/opus
+  https://github.com/xiph/opus
+  Opus audio decode
+
+opusfile (BSD-style)
+  third_party/opusfile
+  https://github.com/xiph/opusfile
+  Seekable Opus-in-Ogg decode
 
 Signalsmith Stretch (MIT)
   third_party/signalsmith-stretch

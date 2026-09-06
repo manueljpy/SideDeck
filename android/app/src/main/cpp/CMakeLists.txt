@@ -19,6 +19,7 @@ set(QM_DSP_DIR "${SIDEDECK_ROOT}/third_party/qm-dsp")
 
 add_subdirectory("${OBOE_DIR}" oboe-build)
 add_subdirectory("${QM_DSP_DIR}" qm-dsp-build)
+include("${SIDEDECK_ROOT}/third_party/opus_stack.cmake")
 
 add_library(dj_engine SHARED "${ENGINE_DIR}/dj_engine.cpp")
 target_compile_definitions(dj_engine PRIVATE _USE_MATH_DEFINES)
@@ -37,6 +38,7 @@ find_library(log-lib log)
 target_link_libraries(dj_engine
   qm_dsp
   oboe
+  opusfile
   android
   ${log-lib}
 )

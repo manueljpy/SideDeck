@@ -1,7 +1,7 @@
 #pragma once
 
-// Streaming MP3/WAV decoder. Include after dr_mp3.h / dr_wav.h.
-// Keep the decoder open, seek, read chunks.
+// Streaming decoder for local files. Include after dr_mp3 / dr_wav / dr_flac
+// and (for Opus) opusfile.h. Keep the decoder open, seek, read chunks.
 
 #include <algorithm>
 #include <cctype>
@@ -12,11 +12,13 @@
 #include <vector>
 
 struct StreamingDecoder {
-  enum class Kind { None, Wav, Mp3 };
+  enum class Kind { None, Wav, Mp3, Flac, Opus };
 
   Kind kind = Kind::None;
   drwav wav{};
   drmp3 mp3{};
+  drflac* flac = nullptr;
+  OggOpusFile* opus = nullptr;
   unsigned channels = 0;
   unsigned sampleRate = 0;
   uint64_t totalFrames = 0;
@@ -33,7 +35,13 @@ struct StreamingDecoder {
     } else if (kind == Kind::Mp3) {
       drmp3_bind_seek_table(&mp3, 0, nullptr);
       drmp3_uninit(&mp3);
+    } else if (kind == Kind::Flac && flac) {
+      drflac_close(flac);
+    } else if (kind == Kind::Opus && opus) {
+      op_free(opus);
     }
+    flac = nullptr;
+    opus = nullptr;
     kind = Kind::None;
     channels = 0;
     sampleRate = 0;
@@ -43,31 +51,20 @@ struct StreamingDecoder {
     std::memset(&mp3, 0, sizeof(mp3));
   }
 
-  static bool fileLooksLikeWav(const char* path) {
-    FILE* f = std::fopen(path, "rb");
-    if (!f) {
-      return false;
-    }
-    unsigned char b[12]{};
-    const size_t n = std::fread(b, 1, 12, f);
-    std::fclose(f);
-    if (n < 12) {
-      return false;
-    }
-    return b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' &&
-           b[9] == 'A' && b[10] == 'V' && b[11] == 'E';
-  }
-
   static bool extIs(const char* path, const char* ext) {
-    const std::string p(path);
-    if (p.size() < 4) {
+    const size_t elen = std::strlen(ext);
+    const size_t plen = std::strlen(path);
+    if (plen < elen || elen < 1) {
       return false;
     }
-    std::string e = p.substr(p.size() - 4);
-    for (char& c : e) {
-      c = (char)std::tolower((unsigned char)c);
+    for (size_t i = 0; i < elen; ++i) {
+      const unsigned char a = (unsigned char)path[plen - elen + i];
+      const unsigned char b = (unsigned char)ext[i];
+      if (std::tolower(a) != std::tolower(b)) {
+        return false;
+      }
     }
-    return e == ext;
+    return true;
   }
 
   bool open(const char* path) {
@@ -75,15 +72,32 @@ struct StreamingDecoder {
     if (!path || !path[0]) {
       return false;
     }
-    const bool preferWav = extIs(path, ".wav") || fileLooksLikeWav(path);
-    if (preferWav && tryWav(path)) {
+
+    // One head read for magic; preference only picks the first decoder to try.
+    unsigned char head[12]{};
+    const size_t nHead = readHead(path, head, sizeof(head));
+    Kind prefer = Kind::None;
+    if (extIs(path, ".wav") || isWav(head, nHead)) {
+      prefer = Kind::Wav;
+    } else if (extIs(path, ".flac") || isFlac(head, nHead)) {
+      prefer = Kind::Flac;
+    } else if (extIs(path, ".opus") || extIs(path, ".ogg") || isOgg(head, nHead)) {
+      prefer = Kind::Opus;
+    } else if (extIs(path, ".mp3")) {
+      prefer = Kind::Mp3;
+    }
+
+    static constexpr Kind kOrder[] = {Kind::Wav, Kind::Flac, Kind::Opus, Kind::Mp3};
+    if (prefer != Kind::None && tryKind(prefer, path)) {
       return true;
     }
-    if (tryMp3(path)) {
-      return true;
-    }
-    if (!preferWav && tryWav(path)) {
-      return true;
+    for (Kind k : kOrder) {
+      if (k == prefer) {
+        continue;
+      }
+      if (tryKind(k, path)) {
+        return true;
+      }
     }
     return false;
   }
@@ -94,6 +108,13 @@ struct StreamingDecoder {
     }
     if (kind == Kind::Mp3) {
       return mp3.currentPCMFrame;
+    }
+    if (kind == Kind::Flac && flac) {
+      return flac->currentPCMFrame;
+    }
+    if (kind == Kind::Opus && opus) {
+      const ogg_int64_t pos = op_pcm_tell(opus);
+      return pos < 0 ? 0 : (uint64_t)pos;
     }
     return 0;
   }
@@ -108,28 +129,58 @@ struct StreamingDecoder {
     if (kind == Kind::Mp3) {
       return drmp3_seek_to_pcm_frame(&mp3, frame) == DRMP3_TRUE;
     }
+    if (kind == Kind::Flac && flac) {
+      return drflac_seek_to_pcm_frame(flac, frame) == DRFLAC_TRUE;
+    }
+    if (kind == Kind::Opus && opus) {
+      return op_pcm_seek(opus, (ogg_int64_t)frame) == 0;
+    }
     return false;
   }
 
   // Always writes interleaved stereo. Returns frames actually read.
+  // May take several underlying codec calls to fill `frames`: opusfile in
+  // particular returns one packet at a time (~2.5–60 ms), so a single call
+  // cannot fill an 8192-frame chunk.
   uint64_t readStereo(float* out, uint64_t frames) {
     if (!out || frames == 0 || kind == Kind::None || channels == 0) {
       return 0;
     }
-    if (channels == 2) {
-      if (kind == Kind::Wav) {
-        return drwav_read_pcm_frames_f32(&wav, frames, out);
+    uint64_t got = 0;
+    while (got < frames) {
+      const uint64_t n = readStereoOnce(out + got * 2, frames - got);
+      if (n == 0) {
+        break;
       }
-      return drmp3_read_pcm_frames_f32(&mp3, frames, out);
+      got += n;
+    }
+    return got;
+  }
+
+ private:
+  // One shot at the underlying codec. Opus may return far fewer than requested.
+  uint64_t readStereoOnce(float* out, uint64_t frames) {
+    if (kind == Kind::Opus && opus) {
+      if (channels >= 2) {
+        const int n = op_read_float_stereo(opus, out, (int)frames * 2);
+        return n < 0 ? 0 : (uint64_t)n;
+      }
+      std::vector<float> tmp((size_t)frames);
+      const int n = op_read_float(opus, tmp.data(), (int)frames, nullptr);
+      if (n <= 0) {
+        return 0;
+      }
+      for (int i = 0; i < n; ++i) {
+        out[i * 2] = out[i * 2 + 1] = tmp[(size_t)i];
+      }
+      return (uint64_t)n;
+    }
+    if (channels == 2) {
+      return readInterleaved(out, frames);
     }
     std::vector<float> tmp((size_t)frames * channels);
-    uint64_t got = 0;
-    if (kind == Kind::Wav) {
-      got = drwav_read_pcm_frames_f32(&wav, frames, tmp.data());
-    } else {
-      got = drmp3_read_pcm_frames_f32(&mp3, frames, tmp.data());
-    }
-    for (uint64_t i = 0; i < got; ++i) {
+    const uint64_t n = readInterleaved(tmp.data(), frames);
+    for (uint64_t i = 0; i < n; ++i) {
       if (channels == 1) {
         out[i * 2] = out[i * 2 + 1] = tmp[(size_t)i];
       } else {
@@ -137,23 +188,111 @@ struct StreamingDecoder {
         out[i * 2 + 1] = tmp[(size_t)i * channels + 1];
       }
     }
+    return n;
+  }
+
+  static size_t readHead(const char* path, unsigned char* out, size_t n) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) {
+      return 0;
+    }
+    const size_t got = std::fread(out, 1, n, f);
+    std::fclose(f);
     return got;
   }
 
- private:
+  static bool isWav(const unsigned char* b, size_t n) {
+    return n >= 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' &&
+           b[9] == 'A' && b[10] == 'V' && b[11] == 'E';
+  }
+
+  static bool isFlac(const unsigned char* b, size_t n) {
+    return n >= 4 && b[0] == 'f' && b[1] == 'L' && b[2] == 'a' && b[3] == 'C';
+  }
+
+  static bool isOgg(const unsigned char* b, size_t n) {
+    return n >= 4 && b[0] == 'O' && b[1] == 'g' && b[2] == 'g' && b[3] == 'S';
+  }
+
+  bool tryKind(Kind k, const char* path) {
+    switch (k) {
+      case Kind::Wav:
+        return tryWav(path);
+      case Kind::Flac:
+        return tryFlac(path);
+      case Kind::Opus:
+        return tryOpus(path);
+      case Kind::Mp3:
+        return tryMp3(path);
+      case Kind::None:
+        return false;
+    }
+    return false;
+  }
+
+  uint64_t readInterleaved(float* out, uint64_t frames) {
+    if (kind == Kind::Wav) {
+      return drwav_read_pcm_frames_f32(&wav, frames, out);
+    }
+    if (kind == Kind::Flac && flac) {
+      return drflac_read_pcm_frames_f32(flac, frames, out);
+    }
+    if (kind == Kind::Mp3) {
+      return drmp3_read_pcm_frames_f32(&mp3, frames, out);
+    }
+    return 0;
+  }
+
+  bool acceptOpen(unsigned ch, unsigned sr, uint64_t frames) {
+    if (ch == 0 || sr == 0 || frames == 0) {
+      close();
+      return false;
+    }
+    channels = ch;
+    sampleRate = sr;
+    totalFrames = frames;
+    return true;
+  }
+
   bool tryWav(const char* path) {
     if (!drwav_init_file(&wav, path, nullptr)) {
       return false;
     }
     kind = Kind::Wav;
-    channels = wav.channels;
-    sampleRate = wav.sampleRate;
-    totalFrames = wav.totalPCMFrameCount;
-    if (channels == 0 || sampleRate == 0 || totalFrames == 0) {
-      close();
+    return acceptOpen(wav.channels, wav.sampleRate, wav.totalPCMFrameCount);
+  }
+
+  bool tryFlac(const char* path) {
+    flac = drflac_open_file(path, nullptr);
+    if (!flac) {
       return false;
     }
-    return true;
+    kind = Kind::Flac;
+    return acceptOpen(flac->channels, flac->sampleRate, flac->totalPCMFrameCount);
+  }
+
+  bool tryOpus(const char* path) {
+    int err = 0;
+    opus = op_open_file(path, &err);
+    if (!opus || err != 0) {
+      opus = nullptr;
+      return false;
+    }
+    if (!op_seekable(opus)) {
+      op_free(opus);
+      opus = nullptr;
+      return false;
+    }
+    const ogg_int64_t total = op_pcm_total(opus, -1);
+    const int ch = op_channel_count(opus, -1);
+    if (total <= 0 || ch < 1) {
+      op_free(opus);
+      opus = nullptr;
+      return false;
+    }
+    kind = Kind::Opus;
+    // Decoded Opus is always 48 kHz.
+    return acceptOpen((unsigned)ch, 48000, (uint64_t)total);
   }
 
   bool tryMp3(const char* path) {
@@ -161,11 +300,7 @@ struct StreamingDecoder {
       return false;
     }
     kind = Kind::Mp3;
-    channels = mp3.channels;
-    sampleRate = mp3.sampleRate;
-    totalFrames = drmp3_get_pcm_frame_count(&mp3);
-    if (channels == 0 || sampleRate == 0 || totalFrames == 0) {
-      close();
+    if (!acceptOpen(mp3.channels, mp3.sampleRate, drmp3_get_pcm_frame_count(&mp3))) {
       return false;
     }
     // Seek table so a backward jump does not restart the file. Without this,
