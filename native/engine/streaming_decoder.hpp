@@ -73,28 +73,33 @@ struct StreamingDecoder {
       return false;
     }
 
-    // One head read for magic; preference only picks the first decoder to try.
-    unsigned char head[12]{};
+    // Enough of the first Ogg page to see OpusHead / vorbis after the page hdr.
+    unsigned char head[64]{};
     const size_t nHead = readHead(path, head, sizeof(head));
-    Kind prefer = Kind::None;
-    if (extIs(path, ".wav") || isWav(head, nHead)) {
-      prefer = Kind::Wav;
-    } else if (extIs(path, ".flac") || isFlac(head, nHead)) {
-      prefer = Kind::Flac;
-    } else if (extIs(path, ".opus") || extIs(path, ".ogg") || isOgg(head, nHead)) {
-      prefer = Kind::Opus;
+
+    // Definite containers: try only the matching decoder. Falling through to
+    // MP3 on an Ogg Vorbis file makes dr_mp3 scan for frame sync forever
+    // (analyze-all looks hung on the first .ogg).
+    if (isOgg(head, nHead) || extIs(path, ".opus") || extIs(path, ".ogg")) {
+      return tryOpus(path);
+    }
+    if (isFlac(head, nHead) || extIs(path, ".flac")) {
+      if (tryFlac(path)) {
+        return true;
+      }
+      // Mislabeled .flac still gets a fallthrough below.
+    } else if (isWav(head, nHead) || extIs(path, ".wav")) {
+      if (tryWav(path)) {
+        return true;
+      }
     } else if (extIs(path, ".mp3")) {
-      prefer = Kind::Mp3;
+      if (tryMp3(path)) {
+        return true;
+      }
     }
 
-    static constexpr Kind kOrder[] = {Kind::Wav, Kind::Flac, Kind::Opus, Kind::Mp3};
-    if (prefer != Kind::None && tryKind(prefer, path)) {
-      return true;
-    }
+    static constexpr Kind kOrder[] = {Kind::Wav, Kind::Flac, Kind::Mp3};
     for (Kind k : kOrder) {
-      if (k == prefer) {
-        continue;
-      }
       if (tryKind(k, path)) {
         return true;
       }
