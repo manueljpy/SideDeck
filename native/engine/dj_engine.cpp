@@ -27,6 +27,9 @@
 #include "dr_mp3.h"
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
+#define DR_FLAC_IMPLEMENTATION
+#include "dr_flac.h"
+#include <opusfile.h>
 
 #include "chunk_cache.hpp"
 
@@ -812,128 +815,46 @@ struct Engine : public oboe::AudioStreamDataCallback,
   }
 
 
-  static bool fileLooksLikeWav(const char* path) {
-    FILE* f = std::fopen(path, "rb");
-    if (!f) {
-      return false;
+  // First 60s, mixed to mono and resampled for BPM/key.
+  static std::vector<float> decodeAnalyzeMono(const char* path, int targetSr) {
+    StreamingDecoder dec;
+    if (!dec.open(path) || dec.sampleRate < 1) {
+      return {};
     }
-    unsigned char b[12]{};
-    const size_t n = std::fread(b, 1, 12, f);
-    std::fclose(f);
-    if (n < 12) {
-      return false;
-    }
-    return b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' &&
-           b[9] == 'A' && b[10] == 'V' && b[11] == 'E';
-  }
-
-  static bool decodeWav(const char* path, std::vector<float>& interleaved, unsigned int& channels,
-                        unsigned int& sampleRate, drmp3_uint64& frames, double maxSec = 0.0) {
-    drwav wav;
-    if (!drwav_init_file(&wav, path, nullptr)) {
-      return false;
-    }
-    channels = wav.channels;
-    sampleRate = wav.sampleRate;
-    frames = wav.totalPCMFrameCount;
-    if (maxSec > 0.0 && sampleRate > 0) {
-      const drmp3_uint64 lim = (drmp3_uint64)(maxSec * (double)sampleRate);
+    uint64_t frames = dec.totalFrames;
+    const double maxSec = analyze_detail::kAnalyzeWindowSec;
+    if (maxSec > 0.0) {
+      const uint64_t lim = (uint64_t)(maxSec * (double)dec.sampleRate);
       if (lim < frames) {
         frames = lim;
       }
     }
-    interleaved.resize((size_t)frames * channels);
-    const drwav_uint64 got = drwav_read_pcm_frames_f32(&wav, frames, interleaved.data());
-    interleaved.resize((size_t)got * channels);
-    frames = got;
-    drwav_uninit(&wav);
-    return frames > 0 && channels > 0;
-  }
-
-  static bool decodeMp3(const char* path, std::vector<float>& interleaved, unsigned int& channels,
-                        unsigned int& sampleRate, drmp3_uint64& frames, double maxSec = 0.0) {
-    if (maxSec > 0.0) {
-      drmp3 mp3{};
-      if (!drmp3_init_file(&mp3, path, nullptr)) {
-        return false;
-      }
-      channels = mp3.channels;
-      sampleRate = mp3.sampleRate;
-      if (channels == 0 || sampleRate == 0) {
-        drmp3_uninit(&mp3);
-        return false;
-      }
-      frames = (drmp3_uint64)(maxSec * (double)sampleRate);
-      interleaved.resize((size_t)frames * channels);
-      const drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, frames, interleaved.data());
-      interleaved.resize((size_t)got * channels);
-      frames = got;
-      drmp3_uninit(&mp3);
-      return frames > 0 && channels > 0;
-    }
-    drmp3_config cfg{};
-    float* data = drmp3_open_file_and_read_pcm_frames_f32(path, &cfg, &frames, nullptr);
-    if (!data) {
-      return false;
-    }
-    channels = cfg.channels;
-    sampleRate = cfg.sampleRate;
-    interleaved.assign(data, data + frames * channels);
-    drmp3_free(data, nullptr);
-    return frames > 0 && channels > 0;
-  }
-
-  // First 60s, mixed to mono and resampled for BPM/key.
-  static std::vector<float> decodeAnalyzeMono(const char* path, int targetSr) {
-    const std::string p(path);
-    std::string ext;
-    if (p.size() >= 4) {
-      ext = p.substr(p.size() - 4);
-      for (char& c : ext) {
-        c = (char)std::tolower((unsigned char)c);
-      }
-    }
-    const bool preferWav = ext == ".wav" || fileLooksLikeWav(path);
-
-    std::vector<float> interleaved;
-    unsigned int channels = 0;
-    unsigned int sampleRate = 0;
-    drmp3_uint64 frames = 0;
-    const double maxSec = analyze_detail::kAnalyzeWindowSec;
-
-    bool ok = preferWav ? decodeWav(path, interleaved, channels, sampleRate, frames, maxSec)
-                        : decodeMp3(path, interleaved, channels, sampleRate, frames, maxSec);
-    if (!ok) {
-      ok = preferWav ? decodeMp3(path, interleaved, channels, sampleRate, frames, maxSec)
-                     : decodeWav(path, interleaved, channels, sampleRate, frames, maxSec);
-    }
-    if (!ok || frames == 0 || channels == 0) {
+    if (frames < 1) {
       return {};
     }
-    return resampleMono(interleavedToMono(interleaved, channels, frames), (int)sampleRate, targetSr);
+    std::vector<float> stereo((size_t)frames * 2);
+    dec.seek(0);
+    uint64_t got = 0;
+    while (got < frames) {
+      const uint64_t n = dec.readStereo(stereo.data() + got * 2, frames - got);
+      if (n == 0) {
+        break;
+      }
+      got += n;
+    }
+    if (got < 1) {
+      return {};
+    }
+    stereo.resize((size_t)got * 2);
+    return resampleMono(interleavedToMono(stereo, 2, got), (int)dec.sampleRate, targetSr);
   }
 
   static double fileDurationSec(const char* path) {
-    {
-      drwav wav{};
-      if (drwav_init_file(&wav, path, nullptr)) {
-        const double sec = wav.sampleRate > 0
-            ? (double)wav.totalPCMFrameCount / (double)wav.sampleRate
-            : 0.0;
-        drwav_uninit(&wav);
-        if (sec > 0.0) {
-          return sec;
-        }
-      }
-    }
-    drmp3 mp3{};
-    if (!drmp3_init_file(&mp3, path, nullptr)) {
+    StreamingDecoder dec;
+    if (!dec.open(path) || dec.sampleRate < 1) {
       return 0.0;
     }
-    const drmp3_uint64 frames = drmp3_get_pcm_frame_count(&mp3);
-    const double sec = mp3.sampleRate > 0 ? (double)frames / (double)mp3.sampleRate : 0.0;
-    drmp3_uninit(&mp3);
-    return sec;
+    return (double)dec.totalFrames / (double)dec.sampleRate;
   }
 };
 

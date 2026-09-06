@@ -40,7 +40,7 @@ Output: `build/app/outputs/flutter-apk/app-debug.apk`
 ## What works today
 
 - Dual-deck landscape UI (waveforms, no platters)
-- Native Oboe engine, MP3 and WAV
+- Native Oboe engine, MP3 / WAV / FLAC / Opus
 - Internal mixer: 3-band EQ, filter, crossfader
 - BPM / key analysis on load (cached in SQLite); Camelot labels
 - Beat detector: Queen Mary TempoTrackV2 + Mixxx BeatUtils; key: Queen Mary GetKeyMode
@@ -80,7 +80,7 @@ SideDeck is a Flutter application (Dart UI + FFI into C++). Docs:
 lib/                 Dart UI, controllers, Subsonic client, FFI
 native/engine/       C++ Oboe engine, EQ, analysis
 android/app/         Android host, USB AudioTrack output
-third_party/         Oboe, Signalsmith, qm-dsp, dr_libs
+third_party/         Oboe, Signalsmith, qm-dsp, dr_libs, ogg/opus/opusfile
 test/                Dart tests
 ```
 

@@ -135,7 +135,7 @@ class LibraryController extends ChangeNotifier {
       await ensurePermission();
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: const ['mp3', 'wav', 'MP3', 'WAV'],
+        allowedExtensions: nativeAudioPickerExtensions(),
         allowMultiple: true,
         withData: false,
       );
@@ -184,7 +184,7 @@ class LibraryController extends ChangeNotifier {
     await for (final entity in dir.list(recursive: true, followLinks: false)) {
       if (entity is! File) continue;
       final ext = p.extension(entity.path).toLowerCase();
-      if (ext == '.mp3' || ext == '.wav') {
+      if (isNativeAudioExtension(ext)) {
         await _addPath(entity.path);
       }
     }

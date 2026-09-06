@@ -1,3 +1,23 @@
+/// Extensions the native engine can open (lowercase, no dot).
+const nativeAudioExtensions = ['mp3', 'wav', 'flac', 'opus', 'ogg'];
+
+bool isNativeAudioExtension(String ext) {
+  var e = ext.toLowerCase();
+  if (e.startsWith('.')) {
+    e = e.substring(1);
+  }
+  if (e == 'wave') {
+    return true;
+  }
+  return nativeAudioExtensions.contains(e);
+}
+
+/// file_picker on Android wants both casings listed.
+List<String> nativeAudioPickerExtensions() => [
+      ...nativeAudioExtensions,
+      ...nativeAudioExtensions.map((e) => e.toUpperCase()),
+    ];
+
 const keyNames = [
   'C',
   'C#',
