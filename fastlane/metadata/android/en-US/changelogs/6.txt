@@ -1,0 +1,3 @@
+- Improved filter, EQ and crossfader experience
+- Improved memory management
+- Added FLAC and Opus support

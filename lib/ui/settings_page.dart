@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sidedeck/state/dj_controller.dart';
 import 'package:sidedeck/subsonic/subsonic_client.dart';
 import 'package:sidedeck/theme/sidedeck_theme.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.dj});
@@ -168,10 +168,11 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'SideDeck 1.0.0\n'
+            'SideDeck 1.1.0\n'
             'Copyright © 2026 SideDeck contributors\n\n'
             'This program is free software under the GNU GPL v3 or later. '
-            'There is no warranty.',
+            'There is no warranty.\n\n'
+            'Support & issues: github.com/manueljpy/SideDeck',
             style: TextStyle(color: SideDeckTheme.muted, fontSize: 12, height: 1.4),
           ),
           const SizedBox(height: 12),
@@ -180,7 +181,7 @@ class _SettingsPageState extends State<SettingsPage> {
               showLicensePage(
                 context: context,
                 applicationName: 'SideDeck',
-                applicationVersion: '1.0.0',
+                applicationVersion: '1.1.0',
                 applicationLegalese:
                     'Copyright © 2026 SideDeck contributors\n\n'
                     'GNU GPL v3 or later. See LICENSE and NOTICE in the '
