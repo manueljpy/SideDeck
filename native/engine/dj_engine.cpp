@@ -659,7 +659,11 @@ struct Engine : public oboe::AudioStreamDataCallback,
   void renderPlay(Deck& d, float* left, float* right, int frames, bool allowLoopWrap) {
     const int totalFrames = (int)d.totalFrames;
     const float rate = d.rate;
-    const bool useKeylock = d.keylock && std::fabs(rate - 1.0f) > 0.002f;
+    // Stay on the stretcher for the whole time keylock is on, including at
+    // rate ≈ 1. Bypassing near unity looked cheap, but a nudge (±8%) then had
+    // to prime on the audio thread (thousands of frames under the cache lock),
+    // which underruns the whole mix even when this deck is xfaded out.
+    const bool useKeylock = d.keylock;
 
     auto applyFx = [&](float& l, float& r) {
       const float loL = d.eqLoL.process(l);
@@ -1052,7 +1056,13 @@ void dj_play(DjEngine engine, int deck, int playing) {
   }
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
-  d.playing = playing != 0 && d.loaded;
+  const bool start = playing != 0 && d.loaded;
+  d.playing = start;
+  // Warm the stretcher here (UI thread) so the first keylock callback does
+  // not spend its whole period priming and starve the other deck.
+  if (start && d.keylock && !d.stretchPrimed) {
+    d.primeStretcher(d.rate);
+  }
 }
 
 void dj_seek(DjEngine engine, int deck, double seconds) {
