@@ -53,9 +53,7 @@ class DjController extends ChangeNotifier {
   double xfader = 0.5;
   double master = 1.0;
   bool externalMixer = false;
-  int outputChannels = 2;
   String usbDeviceName = '';
-  int masterDeck = 0;
   String? engineError;
   int? loadingDeck;
   String? loadingTitle;
@@ -68,11 +66,6 @@ class DjController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setMasterDeck(int i) {
-    masterDeck = i.clamp(0, 1);
-    notifyListeners();
-  }
-
   void _tick() {
     var dirty = false;
     for (var i = 0; i < 2; i++) {
@@ -80,6 +73,9 @@ class DjController extends ChangeNotifier {
       if (!d.loaded || !d.playing) continue;
       d.position = _engine.position(i);
       d.playing = _engine.isPlaying(i);
+      if (d.loopEnabled) {
+        _readLoop(i);
+      }
       dirty = true;
     }
     if (dirty) notifyListeners();
@@ -170,6 +166,25 @@ class DjController extends ChangeNotifier {
     _followMasterBpm(deckIndex);
     notifyListeners();
     return true;
+  }
+
+  /// Re-read a track that was just re-analyzed, so a deck holding it picks up
+  /// the new BPM and beat grid instead of keeping the stale one.
+  Future<void> reloadIfLoaded(
+    String path, {
+    String? title,
+    String? artist,
+  }) async {
+    for (var i = 0; i < 2; i++) {
+      final d = deck(i);
+      if (d.path != path) continue;
+      await loadFile(
+        i,
+        path,
+        title: title ?? d.title,
+        artist: artist ?? d.artist,
+      );
+    }
   }
 
   void playPause(int deckIndex) {
@@ -371,7 +386,6 @@ class DjController extends ChangeNotifier {
   void sync(int slave) {
     final masterIdx = 1 - slave;
     if (!deck(slave).loaded || !deck(masterIdx).loaded) return;
-    masterDeck = masterIdx;
     _nudgeBend[slave] = 0;
     deck(slave).synced = true;
     deck(masterIdx).synced = false;
@@ -448,14 +462,13 @@ class DjController extends ChangeNotifier {
         if (usb.channels >= 8) usbChannels = 8;
       }
     }
-    final prepared = _engine.setExternalMixer(enabled, deviceId: deviceId);
+    final prepared = _engine.setExternalMixer(enabled);
     if (enabled && prepared && Platform.isAndroid) {
       final res = await UsbOutput.startPlayback(
         engineHandle: _engine.nativeHandle,
         deviceId: deviceId,
         channels: usbChannels,
       );
-      outputChannels = res.channels > 0 ? res.channels : usbChannels;
       externalMixer = res.ok;
       if (res.ok) {
         if (res.routedName.isNotEmpty) usbDeviceName = res.routedName;
@@ -466,16 +479,13 @@ class DjController extends ChangeNotifier {
             'This USB device cannot take Deck A and Deck B on separate '
             'channels; audio stayed on the phone.';
         _engine.setExternalMixer(false);
-        outputChannels = _engine.outputChannels;
         externalMixer = false;
       }
     } else if (enabled && !prepared) {
       engineError = '4-channel USB open failed; audio stayed on phone stereo.';
       externalMixer = false;
-      outputChannels = _engine.outputChannels;
     } else {
       externalMixer = false;
-      outputChannels = _engine.outputChannels;
       if (!enabled) engineError = null;
     }
     notifyListeners();

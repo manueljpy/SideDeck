@@ -9,7 +9,6 @@ typedef _DestroyC = Void Function(Pointer<Void>);
 typedef _StartC = Int32 Function(Pointer<Void>);
 typedef _StopC = Void Function(Pointer<Void>);
 typedef _SetModeC = Int32 Function(Pointer<Void>, Int32);
-typedef _SetDeviceC = Void Function(Pointer<Void>, Int32);
 typedef _GetIntC = Int32 Function(Pointer<Void>);
 typedef _LoadC = Int32 Function(Pointer<Void>, Int32, Pointer<Utf8>);
 typedef _LoadAnalyzedC = Int32 Function(
@@ -34,7 +33,6 @@ typedef _GetKeyC = Int32 Function(Pointer<Void>, Int32);
 typedef _NudgeC = Void Function(Pointer<Void>, Int32, Float);
 typedef _SetLoopC = Void Function(Pointer<Void>, Int32, Int32, Float);
 typedef _BeatJumpC = Void Function(Pointer<Void>, Int32, Int32);
-typedef _SyncC = Void Function(Pointer<Void>, Int32, Int32);
 typedef _WaveBinsC = Int32 Function();
 typedef _WaveCopyC = Int32 Function(
   Pointer<Void>,
@@ -64,12 +62,6 @@ class NativeEngine {
       .lookupFunction<_SetModeC, int Function(Pointer<Void>, int)>(
         'dj_set_output_mode',
       );
-  late final _setDevice = _lib
-      .lookupFunction<_SetDeviceC, void Function(Pointer<Void>, int)>(
-        'dj_set_output_device',
-      );
-  late final _getMode = _lib
-      .lookupFunction<_GetIntC, int Function(Pointer<Void>)>('dj_get_output_mode');
   late final _getChannels = _lib.lookupFunction<_GetIntC, int Function(Pointer<Void>)>(
     'dj_get_output_channels',
   );
@@ -146,8 +138,6 @@ class NativeEngine {
       .lookupFunction<_BeatJumpC, void Function(Pointer<Void>, int, int)>(
         'dj_beat_jump',
       );
-  late final _syncTo = _lib
-      .lookupFunction<_SyncC, void Function(Pointer<Void>, int, int)>('dj_sync_to');
   late final _waveBins = _lib.lookupFunction<_WaveBinsC, int Function()>(
     'dj_waveform_bins',
   );
@@ -174,24 +164,17 @@ class NativeEngine {
     return engine;
   }
 
-  bool start() {
-    started = _start(_handle) == 1;
-    return started;
-  }
-
   void dispose() {
     _stop(_handle);
     _destroy(_handle);
   }
 
-  bool setExternalMixer(bool enabled, {int deviceId = 0}) {
-    _setDevice(_handle, deviceId);
+  bool setExternalMixer(bool enabled) {
     final ok = _setMode(_handle, enabled ? 1 : 0) == 1;
     if (ok) started = true;
     return ok;
   }
 
-  int get outputMode => _getMode(_handle);
   int get outputChannels => _getChannels(_handle);
   int get nativeHandle => _handle.address;
 
@@ -244,7 +227,6 @@ class NativeEngine {
   double loopStart(int deck) => _loopStart(_handle, deck);
   double loopEnd(int deck) => _loopEnd(_handle, deck);
   void beatJump(int deck, int beats) => _beatJump(_handle, deck, beats);
-  void syncTo(int slave, int master) => _syncTo(_handle, slave, master);
 
   ({Float32List min, Float32List max}) waveform(int deck) {
     final bins = _waveBins();

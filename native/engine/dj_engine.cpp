@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -26,6 +27,8 @@
 #include "dr_mp3.h"
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
+
+#include "chunk_cache.hpp"
 
 #include <android/log.h>
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "sidedeck", __VA_ARGS__)
@@ -38,6 +41,9 @@ constexpr int kWaveformBins = 32768;
 constexpr int kHotCues = 4;
 constexpr int kMaxCallbackFrames = 2048;
 constexpr int kMaxStretchInFrames = kMaxCallbackFrames * 2 + 256;
+// Loop wrap crossfade, in source frames (~10 ms at 48 kHz). Long enough to
+// hide a bass phase jump at the splice.
+constexpr int kLoopFadeFrames = 512;
 
 constexpr float kEqLowHz = 246.0f;
 constexpr float kEqHighHz = 2484.0f;
@@ -73,7 +79,9 @@ inline void xfaderGains(float x, float& gainA, float& gainB) {
 
 struct Deck {
   std::mutex mutex;
-  std::vector<float> pcm; // interleaved stereo at engine sample rate
+  ChunkCache cache;
+  std::string path;
+  int64_t totalFrames = 0;
   int sampleRate = 48000;
   int channels = 2;
   double playhead = 0.0; // audible file position in frames (fractional)
@@ -96,6 +104,13 @@ struct Deck {
   float bpm = 120.0f;
   int key = -1;
   float beatOffset = 0.0f;
+  std::atomic<int64_t> pendingJump{-1};
+  std::atomic<bool> pendingLoopShift{false};
+  std::atomic<double> pendingLoopDelta{0.0};
+  std::vector<float> jumpXfL, jumpXfR;
+  std::vector<float> loopXfL, loopXfR;
+  float gate = 0.0f;
+  bool pauseXf = false;
 
   std::vector<float> waveMin;
   std::vector<float> waveMax;
@@ -116,17 +131,103 @@ struct Deck {
   double stretchRead = 0.0;
   std::vector<float> stretchInL, stretchInR, stretchOutL, stretchOutR;
 
-  void readPcm(double pos, float& l, float& r) const {
-    const int totalFrames = (int)(pcm.size() / 2);
-    if (pcm.empty() || pos < 0.0 || pos >= (double)totalFrames - 1.0) {
-      l = r = 0.0f;
-      return;
+  // Wrap at loopEnd without a click: over the last kLoopFadeFrames of the
+  // loop, crossfade into the run-up before loopStart. The fade lands exactly
+  // on the splice, so loopEnd meets loopStart on a continuous waveform and the
+  // downbeat at loopStart itself is never smeared. Length is fixed and driven
+  // by absolute position, so it does not depend on where loopEnd happens to
+  // fall inside a callback buffer.
+  double readLooped(double pos, double step, float* L, float* R, int n, bool allowWrap,
+                    bool priming = false) {
+    const double sr = (double)std::max(1, sampleRate);
+    const double st = step < 1.0e-9 ? 1.0 : step;
+    const double a = loopStart * sr;
+    const double b = loopEnd * sr;
+    const double len = b - a;
+    if (!allowWrap || !loopEnabled || len <= 1.0e-6) {
+      cache.readRun(pos, st, L, R, n, priming);
+      return pos + (double)n * st;
     }
-    const int i0 = (int)pos;
-    const int i1 = std::min(i0 + 1, totalFrames - 1);
-    const float frac = (float)(pos - (double)i0);
-    l = pcm[i0 * 2] * (1.0f - frac) + pcm[i1 * 2] * frac;
-    r = pcm[i0 * 2 + 1] * (1.0f - frac) + pcm[i1 * 2 + 1] * frac;
+    // Stay inside the loop, and only fade from run-up that exists. A loop
+    // pinned to the start of the file gets a hard splice.
+    double fade = std::min((double)kLoopFadeFrames, std::min(len * 0.5, a));
+    if (fade < 1.0) {
+      fade = 0.0;
+    }
+    const double fadeStart = b - fade;
+    int done = 0;
+    while (done < n) {
+      if (pos >= b) {
+        double rel = std::fmod(pos - a, len);
+        if (rel < 0.0) {
+          rel += len;
+        }
+        pos = a + rel;
+      }
+      const bool fading = fade > 0.0 && pos >= fadeStart;
+      int cnt = (int)std::ceil(((fading ? b : fadeStart) - pos) / st);
+      cnt = std::max(1, std::min(cnt, n - done));
+      cache.readRun(pos, st, L + done, R + done, cnt, priming);
+      if (fading) {
+        cache.readRun(pos - len, st, loopXfL.data(), loopXfR.data(), cnt, priming);
+        for (int k = 0; k < cnt; ++k) {
+          const float u = clamp01((float)((pos + (double)k * st - fadeStart) / fade));
+          L[done + k] = L[done + k] * (1.0f - u) + loopXfL[k] * u;
+          R[done + k] = R[done + k] * (1.0f - u) + loopXfR[k] * u;
+        }
+      }
+      pos += (double)cnt * st;
+      done += cnt;
+    }
+    return pos;
+  }
+
+  // Every position you can jump to, re-hinted on each buffer so its chunk
+  // stays resident in the cache. That is what makes a cue jump land on
+  // decoded audio instead of waiting for the worker.
+  void hintAnchors() {
+    const int sr = std::max(1, sampleRate);
+    ChunkCache::Span spans[3 + kHotCues];
+    int n = 0;
+    spans[n++] = {(int64_t)(cuePoint * (double)sr), ChunkCache::kChunkFrames};
+    for (const double hotcue : hotcues) {
+      if (hotcue >= 0.0) {
+        spans[n++] = {(int64_t)(hotcue * (double)sr), ChunkCache::kChunkFrames};
+      }
+    }
+    if (loopEnabled) {
+      // A chunk before loopStart as well: the wrap crossfade reads the run-up.
+      const int64_t loopStartFrame = (int64_t)(loopStart * (double)sr);
+      spans[n++] = {loopStartFrame - ChunkCache::kChunkFrames,
+                    ChunkCache::kChunkFrames * 3};
+      const int64_t loopEndFrame = (int64_t)(loopEnd * (double)sr);
+      spans[n++] = {loopEndFrame - ChunkCache::kChunkFrames,
+                    ChunkCache::kChunkFrames * 2};
+    }
+    cache.hintEngineSpans(spans, n);
+  }
+
+  void hintHot() {
+    const int sr = std::max(1, sampleRate);
+    cache.setHotFrame((int64_t)playhead);
+    cache.hintEngineFrames((int64_t)playhead, sr);
+    hintAnchors();
+  }
+
+  void commitJumpTo(double destFrames, bool shiftLoop = false, double loopDelta = 0.0) {
+    cache.jumpTo((int64_t)destFrames);
+    hintAnchors();
+    if (shiftLoop) {
+      pendingLoopDelta.store(loopDelta);
+      pendingLoopShift.store(true);
+    } else {
+      pendingLoopShift.store(false);
+    }
+    if (playing) {
+      pendingJump.store((int64_t)destFrames);
+    } else {
+      applyJump(destFrames);
+    }
   }
 
   void ensureStretcher() {
@@ -139,11 +240,19 @@ struct Deck {
     stretcherReady = true;
     stretchInAccum = 0.0;
     stretchPrimed = false;
-    const int cap = stretcher.outputSeekLength(2.0f) + kMaxCallbackFrames * 2 + 256;
-    if ((int)stretchInL.size() < cap) {
-      stretchInL.assign((size_t)cap, 0.0f);
-      stretchInR.assign((size_t)cap, 0.0f);
+    growReadBuffers(stretcher.outputSeekLength(2.0f) + kMaxCallbackFrames * 2 + 256);
+  }
+
+  // readLooped crossfades into loopXf, so it must hold as many frames as the
+  // stretcher can ever ask for in one go.
+  void growReadBuffers(int frames) {
+    if ((int)stretchInL.size() >= frames) {
+      return;
     }
+    stretchInL.resize((size_t)frames, 0.0f);
+    stretchInR.resize((size_t)frames, 0.0f);
+    loopXfL.resize((size_t)frames, 0.0f);
+    loopXfR.resize((size_t)frames, 0.0f);
   }
 
   void flushStretcher() {
@@ -162,17 +271,34 @@ struct Deck {
     if (need < 1) {
       need = 1;
     }
-    if (need > (int)stretchInL.size()) {
-      stretchInL.resize((size_t)need, 0.0f);
-      stretchInR.resize((size_t)need, 0.0f);
-    }
-    for (int i = 0; i < need; ++i) {
-      readPcm(playhead + (double)i, stretchInL[i], stretchInR[i]);
-    }
+    growReadBuffers(need);
+    stretchRead =
+        readLooped(playhead, 1.0, stretchInL.data(), stretchInR.data(), need, loopEnabled, true);
     float* ptrs[2] = {stretchInL.data(), stretchInR.data()};
     stretcher.outputSeek(ptrs, need);
-    stretchRead = playhead + (double)need;
     stretchPrimed = true;
+  }
+
+  void resetFilters() {
+    eqLoL.reset();
+    eqLoR.reset();
+    eqMidHpL.reset();
+    eqMidHpR.reset();
+    eqMidLpL.reset();
+    eqMidLpR.reset();
+    eqHiL.reset();
+    eqHiR.reset();
+    filtL.reset();
+    filtR.reset();
+  }
+
+  void applyJump(double newPlayhead) {
+    playhead = newPlayhead;
+    if (pendingLoopShift.exchange(false)) {
+      shiftLoop(pendingLoopDelta.load());
+    }
+    flushStretcher();
+    resetFilters();
   }
 
   void rebuildEq(float sr) {
@@ -223,34 +349,32 @@ struct Deck {
     loopEnd = loopStart + loopLengthSec();
   }
 
+  void wrapPlayheadIntoLoopIfNeeded() {
+    if (!loopEnabled || sampleRate < 1) {
+      return;
+    }
+    const double sr = (double)sampleRate;
+    const double len = loopEnd - loopStart;
+    if (len <= 1.0e-6) {
+      return;
+    }
+    const double pos = playhead / sr;
+    if (pos >= loopStart && pos < loopEnd) {
+      return;
+    }
+    double rel = std::fmod(pos - loopStart, len);
+    if (rel < 0.0) {
+      rel += len;
+    }
+    commitJumpTo((loopStart + rel) * sr);
+  }
+
   void shiftLoop(double deltaSec) {
     const double len = loopEnd - loopStart;
     loopStart = std::max(0.0, loopStart + deltaSec);
     loopEnd = loopStart + len;
   }
 };
-
-void fillWaveform(const std::vector<float>& pcm, std::vector<float>& waveMin,
-                  std::vector<float>& waveMax) {
-  waveMin.assign(kWaveformBins, 0.0f);
-  waveMax.assign(kWaveformBins, 0.0f);
-  const int frames = (int)(pcm.size() / 2);
-  if (frames <= 0) {
-    return;
-  }
-  for (int b = 0; b < kWaveformBins; ++b) {
-    const int start = (int)((int64_t)b * frames / kWaveformBins);
-    const int end = (int)((int64_t)(b + 1) * frames / kWaveformBins);
-    float mn = 0.0f, mx = 0.0f;
-    for (int i = start; i < end; ++i) {
-      const float s = 0.5f * (pcm[i * 2] + pcm[i * 2 + 1]);
-      mn = std::min(mn, s);
-      mx = std::max(mx, s);
-    }
-    waveMin[b] = mn;
-    waveMax[b] = mx;
-  }
-}
 
 std::vector<float> resampleMono(const std::vector<float>& mono, int srcSr, int dstSr) {
   if (srcSr <= 0 || dstSr <= 0 || mono.empty() || srcSr == dstSr) {
@@ -286,25 +410,6 @@ std::vector<float> interleavedToMono(const std::vector<float>& interleaved, unsi
   return mono;
 }
 
-std::vector<float> resampleStereo(const std::vector<float>& stereo, int srcSr, int dstSr) {
-  if (srcSr <= 0 || dstSr <= 0 || stereo.size() < 2 || srcSr == dstSr) {
-    return stereo;
-  }
-  const int frames = (int)(stereo.size() / 2);
-  const double ratio = (double)dstSr / (double)srcSr;
-  const int outFrames = std::max(1, (int)(frames * ratio));
-  std::vector<float> out((size_t)outFrames * 2);
-  for (int i = 0; i < outFrames; ++i) {
-    const double src = (double)i / ratio;
-    const int i0 = std::min((int)src, frames - 1);
-    const int i1 = std::min(i0 + 1, frames - 1);
-    const float frac = (float)(src - (double)i0);
-    out[i * 2] = stereo[i0 * 2] * (1.0f - frac) + stereo[i1 * 2] * frac;
-    out[i * 2 + 1] = stereo[i0 * 2 + 1] * (1.0f - frac) + stereo[i1 * 2 + 1] * frac;
-  }
-  return out;
-}
-
 struct AtomicFlag {
   std::atomic<bool>& flag;
   explicit AtomicFlag(std::atomic<bool>& f) : flag(f) { flag.store(true); }
@@ -319,7 +424,6 @@ struct Engine : public oboe::AudioStreamDataCallback,
   std::atomic<float> xfader{0.5f};
   std::atomic<float> master{1.0f};
   std::atomic<int> outputMode{0}; // 0 internal 2ch, 1 external 4ch
-  std::atomic<int> outputDeviceId{0};
   std::atomic<int> engineSampleRate{48000};
   std::atomic<int> engineChannels{2};
   std::atomic<bool> alive{true};
@@ -337,25 +441,64 @@ struct Engine : public oboe::AudioStreamDataCallback,
       d.stretchInR.assign((size_t)kMaxStretchInFrames, 0.0f);
       d.stretchOutL.assign((size_t)kMaxCallbackFrames, 0.0f);
       d.stretchOutR.assign((size_t)kMaxCallbackFrames, 0.0f);
+      d.jumpXfL.assign((size_t)kMaxCallbackFrames, 0.0f);
+      d.jumpXfR.assign((size_t)kMaxCallbackFrames, 0.0f);
+      d.loopXfL.assign((size_t)kMaxStretchInFrames, 0.0f);
+      d.loopXfR.assign((size_t)kMaxStretchInFrames, 0.0f);
     }
+  }
+
+  ~Engine() {
+    alive.store(false);
+    closeStream();
+    decks[0].cache.stop();
+    decks[1].cache.stop();
   }
 
   void applyLoadedDeckSampleRate(int newSr) {
     for (auto& d : decks) {
-      std::lock_guard<std::mutex> dl(d.mutex);
-      if (d.loaded && !d.pcm.empty() && d.sampleRate > 0 && d.sampleRate != newSr) {
-        const double scale = (double)newSr / (double)d.sampleRate;
-        d.pcm = resampleStereo(d.pcm, d.sampleRate, newSr);
-        d.playhead *= scale;
+      std::string path;
+      double playhead = 0;
+      bool loaded = false;
+      bool wasPlaying = false;
+      int oldSr = 0;
+      {
+        std::lock_guard<std::mutex> dl(d.mutex);
+        loaded = d.loaded;
+        path = d.path;
+        playhead = d.playhead;
+        oldSr = d.sampleRate;
+        wasPlaying = d.playing;
+        if (loaded && !path.empty() && oldSr > 0 && oldSr != newSr) {
+          // Reopening the cache tears down its slots. Park the deck first so
+          // a render in flight reads silence instead of a half-open cache.
+          d.loaded = false;
+          d.playing = false;
+        }
+      }
+      if (loaded && !path.empty() && oldSr > 0 && oldSr != newSr) {
+        const double scale = (double)newSr / (double)oldSr;
+        d.cache.open(path.c_str(), newSr);
+        std::lock_guard<std::mutex> dl(d.mutex);
+        d.playhead = playhead * scale;
         d.sampleRate = newSr;
+        d.totalFrames = d.cache.engineFrames();
         d.flushStretcher();
         d.stretcherReady = false;
         d.stretcherSr = 0;
-      } else if (!d.loaded) {
-        d.sampleRate = newSr;
+        d.loaded = d.totalFrames > 1;
+        d.playing = wasPlaying && d.loaded;
+        d.hintHot();
+        d.rebuildEq((float)newSr);
+        d.rebuildFilter((float)newSr);
+      } else {
+        std::lock_guard<std::mutex> dl(d.mutex);
+        if (!d.loaded) {
+          d.sampleRate = newSr;
+        }
+        d.rebuildEq((float)newSr);
+        d.rebuildFilter((float)newSr);
       }
-      d.rebuildEq((float)newSr);
-      d.rebuildFilter((float)newSr);
     }
   }
 
@@ -446,21 +589,74 @@ struct Engine : public oboe::AudioStreamDataCallback,
       std::fill(right, right + frames, 0.0f);
       return;
     }
-    if (!d.loaded || d.pcm.empty()) {
+    if (!d.loaded || d.totalFrames < 2) {
       std::fill(left, left + frames, 0.0f);
       std::fill(right, right + frames, 0.0f);
       return;
     }
 
-    const int totalFrames = (int)(d.pcm.size() / 2);
+    const int64_t jumpTo = d.pendingJump.exchange(-1);
+    bool filled = false;
+    if (jumpTo >= 0 && d.playing) {
+      // Old pass must not wrap: a shortened loop would snap before the xf.
+      renderPlay(d, d.jumpXfL.data(), d.jumpXfR.data(), frames, false);
+      d.applyJump((double)jumpTo);
+      d.playing = true; // old pass can hit EOF and clear this
+      renderPlay(d, left, right, frames, true);
+      const float denom = (float)std::max(1, frames - 1);
+      for (int i = 0; i < frames; ++i) {
+        const float t = (float)i / denom;
+        left[i] = d.jumpXfL[i] * (1.0f - t) + left[i] * t;
+        right[i] = d.jumpXfR[i] * (1.0f - t) + right[i] * t;
+      }
+      filled = true;
+    } else if (jumpTo >= 0) {
+      d.applyJump((double)jumpTo);
+    }
+
+    if (!filled) {
+      if (!d.playing && d.gate <= 0.0f) {
+        std::fill(left, left + frames, 0.0f);
+        std::fill(right, right + frames, 0.0f);
+        d.pauseXf = false;
+        return;
+      }
+      if (d.playing) {
+        d.pauseXf = false;
+        renderPlay(d, left, right, frames, true);
+      } else if (!d.pauseXf) {
+        // Fade out a peeked buffer; restore playhead so pause does not crawl.
+        const double ph = d.playhead;
+        const double rd = d.stretchRead;
+        renderPlay(d, left, right, frames, true);
+        d.playhead = ph;
+        d.stretchRead = rd;
+        d.flushStretcher();
+        std::copy(left, left + frames, d.jumpXfL.begin());
+        std::copy(right, right + frames, d.jumpXfR.begin());
+        d.pauseXf = true;
+      } else {
+        std::copy(d.jumpXfL.begin(), d.jumpXfL.begin() + frames, left);
+        std::copy(d.jumpXfR.begin(), d.jumpXfR.begin() + frames, right);
+      }
+    }
+
+    const float step = 1.0f / 256.0f;
+    for (int i = 0; i < frames; ++i) {
+      if (d.playing) {
+        d.gate = std::min(1.0f, d.gate + step);
+      } else {
+        d.gate = std::max(0.0f, d.gate - step);
+      }
+      left[i] *= d.gate;
+      right[i] *= d.gate;
+    }
+  }
+
+  void renderPlay(Deck& d, float* left, float* right, int frames, bool allowLoopWrap) {
+    const int totalFrames = (int)d.totalFrames;
     const float rate = d.rate;
     const bool useKeylock = d.keylock && std::fabs(rate - 1.0f) > 0.002f;
-
-    if (!d.playing) {
-      std::fill(left, left + frames, 0.0f);
-      std::fill(right, right + frames, 0.0f);
-      return;
-    }
 
     auto applyFx = [&](float& l, float& r) {
       const float loL = d.eqLoL.process(l);
@@ -480,13 +676,6 @@ struct Engine : public oboe::AudioStreamDataCallback,
 
     if (useKeylock) {
       d.ensureStretcher();
-      if (d.loopEnabled) {
-        const double posSec = d.playhead / (double)std::max(1, d.sampleRate);
-        if (posSec >= d.loopEnd) {
-          d.playhead = d.loopStart * (double)d.sampleRate;
-          d.flushStretcher();
-        }
-      }
       if (!d.stretchPrimed) {
         d.primeStretcher(rate);
       }
@@ -503,10 +692,8 @@ struct Engine : public oboe::AudioStreamDataCallback,
       d.stretchInAccum -= (double)inN;
       inN = std::max(1, std::min(inN, (int)d.stretchInL.size()));
 
-      for (int put = 0; put < inN; ++put) {
-        d.readPcm(d.stretchRead, d.stretchInL[put], d.stretchInR[put]);
-        d.stretchRead += 1.0;
-      }
+      d.stretchRead = d.readLooped(d.stretchRead, 1.0, d.stretchInL.data(), d.stretchInR.data(),
+                                   inN, allowLoopWrap);
 
       float* inPtrs[2] = {d.stretchInL.data(), d.stretchInR.data()};
       float* outPtrs[2] = {d.stretchOutL.data(), d.stretchOutR.data()};
@@ -520,41 +707,39 @@ struct Engine : public oboe::AudioStreamDataCallback,
         right[i] = r;
       }
       d.playhead += (double)frames * (double)rate;
+      if (allowLoopWrap && d.loopEnabled) {
+        const double sr = (double)std::max(1, d.sampleRate);
+        const double a = d.loopStart * sr;
+        const double b = d.loopEnd * sr;
+        const double len = b - a;
+        if (len > 1.0e-6 && d.playhead >= b) {
+          double rel = std::fmod(d.playhead - a, len);
+          if (rel < 0.0) {
+            rel += len;
+          }
+          d.playhead = a + rel;
+        }
+      }
       if (d.playhead >= totalFrames - 1) {
         d.playing = false;
         d.playhead = (double)std::max(0, totalFrames - 1);
       }
+      d.hintHot();
       return;
     }
 
     d.stretchPrimed = false;
 
     // Keylock off: classic resample (pitch follows tempo).
+    d.playhead = d.readLooped(d.playhead, (double)rate, left, right, frames, allowLoopWrap);
     for (int i = 0; i < frames; ++i) {
-      if (d.loopEnabled) {
-        const double posSec = d.playhead / (double)std::max(1, d.sampleRate);
-        if (posSec >= d.loopEnd) {
-          d.playhead = d.loopStart * (double)d.sampleRate;
-        }
-      }
-
-      if (d.playhead >= totalFrames - 1) {
-        d.playing = false;
-        d.playhead = (double)std::max(0, totalFrames - 1);
-        left[i] = right[i] = 0;
-        continue;
-      }
-
-      const int i0 = (int)d.playhead;
-      const int i1 = std::min(i0 + 1, totalFrames - 1);
-      const float frac = (float)(d.playhead - (double)i0);
-      float l = d.pcm[i0 * 2] * (1.0f - frac) + d.pcm[i1 * 2] * frac;
-      float r = d.pcm[i0 * 2 + 1] * (1.0f - frac) + d.pcm[i1 * 2 + 1] * frac;
-      applyFx(l, r);
-      left[i] = l;
-      right[i] = r;
-      d.playhead += (double)rate;
+      applyFx(left[i], right[i]);
     }
+    if (!d.loopEnabled && d.playhead >= totalFrames - 1) {
+      d.playing = false;
+      d.playhead = (double)std::max(0, totalFrames - 1);
+    }
+    d.hintHot();
   }
 
   void renderInterleaved(float* out, int frames, int channels) {
@@ -698,51 +883,6 @@ struct Engine : public oboe::AudioStreamDataCallback,
     return frames > 0 && channels > 0;
   }
 
-  static std::vector<float> decodeFile(const char* path, int targetSr) {
-    const std::string p(path);
-    std::string ext;
-    if (p.size() >= 4) {
-      ext = p.substr(p.size() - 4);
-      for (char& c : ext) {
-        c = (char)std::tolower((unsigned char)c);
-      }
-    }
-    const bool preferWav = ext == ".wav" || fileLooksLikeWav(path);
-
-    std::vector<float> interleaved;
-    unsigned int channels = 0;
-    unsigned int sampleRate = 0;
-    drmp3_uint64 frames = 0;
-
-    bool ok = preferWav ? decodeWav(path, interleaved, channels, sampleRate, frames)
-                        : decodeMp3(path, interleaved, channels, sampleRate, frames);
-    if (!ok) {
-      ok = preferWav ? decodeMp3(path, interleaved, channels, sampleRate, frames)
-                     : decodeWav(path, interleaved, channels, sampleRate, frames);
-    }
-    if (!ok) {
-      LOGE("decode failed: %s", path);
-      return {};
-    }
-
-    if (frames == 0 || channels == 0) {
-      return {};
-    }
-
-    // Convert to stereo.
-    std::vector<float> stereo(frames * 2);
-    for (drmp3_uint64 i = 0; i < frames; ++i) {
-      if (channels == 1) {
-        stereo[i * 2] = stereo[i * 2 + 1] = interleaved[i];
-      } else {
-        stereo[i * 2] = interleaved[i * channels];
-        stereo[i * 2 + 1] = interleaved[i * channels + 1];
-      }
-    }
-
-    return resampleStereo(stereo, (int)sampleRate, targetSr);
-  }
-
   // First 60s, mixed to mono and resampled for BPM/key.
   static std::vector<float> decodeAnalyzeMono(const char* path, int targetSr) {
     const std::string p(path);
@@ -799,23 +939,6 @@ struct Engine : public oboe::AudioStreamDataCallback,
 
 Engine* asEngine(DjEngine e) { return static_cast<Engine*>(e); }
 
-AnalysisResult analyzePlaybackPcm(const float* interleaved, int frames, int channels, float sampleRate,
-                                  float tagBpm, int tagKey) {
-  if (!interleaved || frames < 1 || channels < 1 || sampleRate < 1.0f) {
-    return {};
-  }
-  const int window = std::min(frames, (int)(analyze_detail::kAnalyzeWindowSec * sampleRate));
-  std::vector<float> mono((size_t)window);
-  for (int i = 0; i < window; ++i) {
-    const float* s = interleaved + (size_t)i * (size_t)channels;
-    mono[(size_t)i] = channels <= 1 ? s[0] : 0.5f * (s[0] + s[1]);
-  }
-  std::vector<float> resampled =
-      resampleMono(mono, (int)sampleRate, (int)analyze_detail::kAnalyzeSr);
-  return analyzeTrack(resampled.data(), (int)resampled.size(), 1, analyze_detail::kAnalyzeSr, tagBpm,
-                      tagKey);
-}
-
 } // namespace
 
 extern "C" {
@@ -835,10 +958,6 @@ void dj_destroy(DjEngine engine) {
 int dj_start(DjEngine engine) { return asEngine(engine)->openStream() ? 1 : 0; }
 
 void dj_stop(DjEngine engine) { asEngine(engine)->closeStream(); }
-
-void dj_set_output_device(DjEngine engine, int device_id) {
-  asEngine(engine)->outputDeviceId.store(device_id > 0 ? device_id : 0);
-}
 
 int dj_set_output_mode(DjEngine engine, int mode) {
   auto* e = asEngine(engine);
@@ -879,10 +998,6 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
   }
   auto* e = asEngine(engine);
   const int sr = e->engineSampleRate.load();
-  auto pcm = Engine::decodeFile(path, sr);
-  if (pcm.empty()) {
-    return 0;
-  }
 
   AnalysisResult analysis;
   if (bpm > 1.0f) {
@@ -891,36 +1006,72 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
     analysis.beatOffsetSec = beat_offset;
   } else {
     const id3_meta::Tags tags = id3_meta::read(path);
-    analysis = analyzePlaybackPcm(pcm.data(), (int)(pcm.size() / 2), 2, (float)sr, tags.bpm, tags.key);
+    auto prefix = Engine::decodeAnalyzeMono(path, (int)analyze_detail::kAnalyzeSr);
+    if (prefix.empty()) {
+      return 0;
+    }
+    analysis =
+        analyzeTrack(prefix.data(), (int)prefix.size(), 1, analyze_detail::kAnalyzeSr, tags.bpm,
+                     tags.key);
   }
 
-  std::vector<float> wmin, wmax;
-  fillWaveform(pcm, wmin, wmax);
-
   Deck& d = e->decks[deck];
+  {
+    std::lock_guard<std::mutex> lock(d.mutex);
+    d.playing = false;
+    d.loaded = false;
+    d.pendingJump.store(-1);
+    d.pendingLoopShift.store(false);
+    d.gate = 0.0f;
+    d.pauseXf = false;
+  }
+  if (!d.cache.open(path, sr)) {
+    return 0;
+  }
+  d.cache.hintEngineFrames(0, (int64_t)sr * 2);
+
+  std::vector<float> wmin, wmax;
+  {
+    StreamingDecoder scan;
+    if (!scan.open(path)) {
+      d.cache.stop();
+      return 0;
+    }
+    scanWaveform(scan, kWaveformBins, wmin, wmax);
+  }
+
+  d.cache.waitChunk(0, 2500);
+
   std::lock_guard<std::mutex> lock(d.mutex);
-  d.pcm = std::move(pcm);
+  d.path = path;
   d.sampleRate = sr;
   d.channels = 2;
+  d.totalFrames = d.cache.engineFrames();
   d.playhead = 0;
   d.cuePoint = 0;
   d.playing = false;
-  d.loaded = true;
+  d.loaded = d.totalFrames > 1;
   d.bpm = analysis.bpm;
   d.key = analysis.key;
   d.beatOffset = analysis.beatOffsetSec;
   d.waveMin = std::move(wmin);
   d.waveMax = std::move(wmax);
   d.flushStretcher();
+  d.resetFilters();
   d.ensureStretcher();
   for (int i = 0; i < kHotCues; ++i) {
     d.hotcues[i] = -1;
   }
   d.loopEnabled = false;
+  d.pendingJump.store(-1);
+  d.pendingLoopShift.store(false);
+  d.gate = 0.0f;
+  d.pauseXf = false;
   d.rebuildEq((float)sr);
   d.rebuildFilter((float)sr);
-  LOGI("loaded deck %d frames=%zu bpm=%.2f key=%d", deck, d.pcm.size() / 2, d.bpm, d.key);
-  return 1;
+  d.hintHot();
+  LOGI("loaded deck %d frames=%lld bpm=%.2f key=%d", deck, (long long)d.totalFrames, d.bpm, d.key);
+  return d.loaded ? 1 : 0;
 }
 
 int dj_analyze_file(const char* path, float* bpm, int* key, float* beat_offset) {
@@ -958,12 +1109,20 @@ void dj_unload(DjEngine engine, int deck) {
     return;
   }
   Deck& d = asEngine(engine)->decks[deck];
-  std::lock_guard<std::mutex> lock(d.mutex);
-  d.pcm.clear();
-  d.loaded = false;
-  d.playing = false;
-  d.waveMin.clear();
-  d.waveMax.clear();
+  {
+    std::lock_guard<std::mutex> lock(d.mutex);
+    d.loaded = false;
+    d.playing = false;
+    d.pendingJump.store(-1);
+    d.pendingLoopShift.store(false);
+    d.gate = 0.0f;
+    d.pauseXf = false;
+    d.waveMin.clear();
+    d.waveMax.clear();
+    d.totalFrames = 0;
+    d.path.clear();
+  }
+  d.cache.stop();
 }
 
 void dj_play(DjEngine engine, int deck, int playing) {
@@ -981,9 +1140,10 @@ void dj_seek(DjEngine engine, int deck, double seconds) {
   }
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
-  const double maxFrame = d.pcm.empty() ? 0.0 : (double)(d.pcm.size() / 2) - 1.0;
-  d.playhead = std::max(0.0, std::min(seconds * (double)std::max(1, d.sampleRate), maxFrame));
-  d.flushStretcher();
+  const double maxFrame = d.totalFrames < 2 ? 0.0 : (double)d.totalFrames - 1.0;
+  const double dest =
+      std::max(0.0, std::min(seconds * (double)std::max(1, d.sampleRate), maxFrame));
+  d.commitJumpTo(dest);
 }
 
 void dj_set_cue(DjEngine engine, int deck) {
@@ -1001,11 +1161,7 @@ void dj_jump_cue(DjEngine engine, int deck) {
   }
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
-  d.playhead = d.cuePoint * (double)d.sampleRate;
-  d.flushStretcher();
-  if (!d.playing) {
-    // Cue preview: stay paused at cue.
-  }
+  d.commitJumpTo(d.cuePoint * (double)d.sampleRate);
 }
 
 double dj_position(DjEngine engine, int deck) {
@@ -1023,7 +1179,8 @@ double dj_duration(DjEngine engine, int deck) {
   }
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
-  return d.pcm.empty() ? 0.0 : (d.pcm.size() / 2.0) / (double)std::max(1, d.sampleRate);
+  return d.totalFrames < 2 ? 0.0
+                           : (double)d.totalFrames / (double)std::max(1, d.sampleRate);
 }
 
 int dj_playing(DjEngine engine, int deck) {
@@ -1166,6 +1323,7 @@ void dj_set_loop(DjEngine engine, int deck, int enabled, float bars) {
   }
   if (wasOn) {
     d.resizeLoopFromStart();
+    d.wrapPlayheadIntoLoopIfNeeded();
   } else {
     d.captureLoopAtPlayhead();
   }
@@ -1205,8 +1363,7 @@ void dj_jump_hotcue(DjEngine engine, int deck, int index) {
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
   if (d.hotcues[index] >= 0) {
-    d.playhead = d.hotcues[index] * (double)d.sampleRate;
-    d.flushStretcher();
+    d.commitJumpTo(d.hotcues[index] * (double)d.sampleRate);
   }
 }
 
@@ -1235,28 +1392,8 @@ void dj_beat_jump(DjEngine engine, int deck, int beats) {
   Deck& d = asEngine(engine)->decks[deck];
   std::lock_guard<std::mutex> lock(d.mutex);
   const double delta = (60.0 / (double)std::max(1.0f, d.bpm)) * (double)beats;
-  d.playhead = std::max(0.0, d.playhead + delta * (double)d.sampleRate);
-  if (d.loopEnabled) {
-    d.shiftLoop(delta);
-  }
-  d.flushStretcher();
-}
-
-void dj_sync_to(DjEngine engine, int slave, int master) {
-  if (slave < 0 || slave > 1 || master < 0 || master > 1 || slave == master) {
-    return;
-  }
-  auto* e = asEngine(engine);
-  Deck& s = e->decks[slave];
-  Deck& m = e->decks[master];
-  std::scoped_lock lock(s.mutex, m.mutex);
-  if (!s.loaded || !m.loaded) {
-    return;
-  }
-  // Tempo only — do not move the playhead.
-  const float masterEffective = m.bpm * m.rate;
-  s.rate = (s.bpm > 1.0f && masterEffective > 1.0f) ? (masterEffective / s.bpm) : 1.0f;
-  s.rate = std::max(0.5f, std::min(2.0f, s.rate));
+  const double dest = std::max(0.0, d.playhead + delta * (double)d.sampleRate);
+  d.commitJumpTo(dest, d.loopEnabled, delta);
 }
 
 int dj_waveform_bins(void) { return kWaveformBins; }

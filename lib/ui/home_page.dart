@@ -181,6 +181,7 @@ class _HomePageState extends State<HomePage> {
                   duration: d.duration,
                   beatOffset: d.beatOffset,
                   bpm: d.bpm,
+                  rate: d.rate,
                   color: accent,
                   loopEnabled: d.loopEnabled,
                   loopStart: d.loopStart,
