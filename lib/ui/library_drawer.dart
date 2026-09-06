@@ -232,17 +232,11 @@ class _LibraryOverlayState extends State<LibraryOverlay> {
       } catch (_) {}
       if (!mounted) return;
       setState(() => _remoteMeta[track.id] = result);
-      for (var deck = 0; deck < 2; deck++) {
-        final d = widget.dj.deck(deck);
-        if (d.path == path) {
-          await widget.dj.loadFile(
-            deck,
-            path,
-            title: track.title,
-            artist: track.artist,
-          );
-        }
-      }
+      await widget.dj.reloadIfLoaded(
+        path,
+        title: track.title,
+        artist: track.artist,
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -259,17 +253,13 @@ class _LibraryOverlayState extends State<LibraryOverlay> {
   }
 
   Future<void> _analyzeLocal(LibraryTrack t) async {
-    await widget.library.analyzePath(t.path);
-    for (var deck = 0; deck < 2; deck++) {
-      final d = widget.dj.deck(deck);
-      if (d.path == t.path) {
-        await widget.dj.loadFile(
-          deck,
-          t.path,
-          title: t.title,
-          artist: t.artist,
-        );
-      }
+    final analyzed = await widget.library.analyzePath(t.path);
+    await _reloadAnalyzedDecks(analyzed);
+  }
+
+  Future<void> _reloadAnalyzedDecks(List<String> paths) async {
+    for (final path in paths) {
+      await widget.dj.reloadIfLoaded(path);
     }
   }
 
@@ -365,11 +355,11 @@ class _LibraryOverlayState extends State<LibraryOverlay> {
                         enabled: lib.tracks.isNotEmpty,
                         padding: EdgeInsets.zero,
                         icon: const Icon(Icons.graphic_eq, size: 22),
-                        onSelected: (v) {
+                        onSelected: (v) async {
                           if (v == 'missing') {
-                            lib.analyzeMissing();
+                            await _reloadAnalyzedDecks(await lib.analyzeMissing());
                           } else if (v == 'all') {
-                            lib.analyzeAll();
+                            await _reloadAnalyzedDecks(await lib.analyzeAll());
                           }
                         },
                         itemBuilder: (context) => [

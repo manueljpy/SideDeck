@@ -12,10 +12,10 @@ void dj_destroy(DjEngine engine);
 int dj_start(DjEngine engine);
 void dj_stop(DjEngine engine);
 
-/** Output mode: 0 = internal stereo (phone), 1 = external 4ch USB (deck A 1-2, B 3-4). */
+/** Output mode: 0 = internal stereo (phone), 1 = external 4ch USB (deck A 1-2, B 3-4).
+ *  In mode 1 Oboe is stopped and the Java USB AudioTrack is the sink, so USB
+ *  device selection happens on the Java side, not here. */
 int dj_set_output_mode(DjEngine engine, int mode);
-/** Android AudioDeviceInfo id, or 0 for default. Call before dj_set_output_mode. */
-void dj_set_output_device(DjEngine engine, int device_id);
 int dj_get_output_mode(DjEngine engine);
 int dj_get_output_channels(DjEngine engine);
 
@@ -54,8 +54,6 @@ void dj_jump_hotcue(DjEngine engine, int deck, int index);
 double dj_get_hotcue(DjEngine engine, int deck, int index);
 void dj_clear_hotcue(DjEngine engine, int deck, int index);
 void dj_beat_jump(DjEngine engine, int deck, int beats);
-/** Match slave tempo to master. Does not move the playhead. */
-void dj_sync_to(DjEngine engine, int slave, int master);
 
 int dj_waveform_bins(void);
 int dj_waveform_copy(DjEngine engine, int deck, float* min_out, float* max_out, int bins);

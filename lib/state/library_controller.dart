@@ -242,22 +242,25 @@ class LibraryController extends ChangeNotifier {
     _cancelAnalyze = true;
   }
 
-  Future<void> analyzePath(String path) async {
-    if (analyzing) return;
-    await _analyzeList([path]);
+  /// Returns the paths that were successfully analyzed, so callers can refresh
+  /// anything holding the old values (e.g. a deck with the track loaded).
+  Future<List<String>> analyzePath(String path) async {
+    if (analyzing) return const [];
+    return _analyzeList([path]);
   }
 
-  Future<void> analyzeMissing() async {
+  Future<List<String>> analyzeMissing() async {
     final pending = tracks.where((t) => !t.hasAnalysis).map((t) => t.path).toList();
-    await _analyzeList(pending);
+    return _analyzeList(pending);
   }
 
-  Future<void> analyzeAll() async {
-    await _analyzeList(tracks.map((t) => t.path).toList());
+  Future<List<String>> analyzeAll() async {
+    return _analyzeList(tracks.map((t) => t.path).toList());
   }
 
-  Future<void> _analyzeList(List<String> paths) async {
-    if (paths.isEmpty || analyzing) return;
+  Future<List<String>> _analyzeList(List<String> paths) async {
+    final analyzed = <String>[];
+    if (paths.isEmpty || analyzing) return analyzed;
     analyzing = true;
     _cancelAnalyze = false;
     analyzeDone = 0;
@@ -284,6 +287,7 @@ class LibraryController extends ChangeNotifier {
           );
         } catch (_) {}
         upsertAnalysis(path, bpm: result.bpm, key: result.key);
+        analyzed.add(path);
       }
     } catch (e) {
       error = e.toString();
@@ -293,6 +297,7 @@ class LibraryController extends ChangeNotifier {
     analyzeTotal = 0;
     analyzeDone = 0;
     _emit();
+    return analyzed;
   }
 }
 

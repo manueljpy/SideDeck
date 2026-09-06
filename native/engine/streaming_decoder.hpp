@@ -98,6 +98,9 @@ struct StreamingDecoder {
     return 0;
   }
 
+  // A bound table makes dr_mp3 handle the bit reservoir on seek itself.
+  bool hasSeekTable() const { return kind == Kind::Mp3 && !seekPoints.empty(); }
+
   bool seek(uint64_t frame) {
     if (kind == Kind::Wav) {
       return drwav_seek_to_pcm_frame(&wav, frame) == DRWAV_TRUE;
@@ -137,13 +140,6 @@ struct StreamingDecoder {
     return got;
   }
 
-  int64_t engineFrameCount(int engineSr) const {
-    if (sampleRate <= 0 || engineSr <= 0) {
-      return 0;
-    }
-    return (int64_t)((double)totalFrames * (double)engineSr / (double)sampleRate);
-  }
-
  private:
   bool tryWav(const char* path) {
     if (!drwav_init_file(&wav, path, nullptr)) {
@@ -174,8 +170,12 @@ struct StreamingDecoder {
     }
     // Seek table so a backward jump does not restart the file. Without this,
     // dr_mp3 brute-force seek goes to byte 0 whenever the target is behind
-    // the cursor.
-    drmp3_uint32 n = 512;
+    // the cursor. Density matters as much as presence: between points dr_mp3
+    // has to decode forward to reach the target, and that is dead time on a
+    // cue jump. Roughly 10 per second lands within 100 ms of anywhere, at
+    // 16 bytes per point.
+    const double seconds = (double)totalFrames / (double)sampleRate;
+    drmp3_uint32 n = (drmp3_uint32)std::min(std::max(seconds * 10.0, 512.0), 16384.0);
     seekPoints.assign(n, drmp3_seek_point{});
     if (drmp3_calculate_seek_points(&mp3, &n, seekPoints.data()) == DRMP3_TRUE && n > 0) {
       seekPoints.resize(n);
