@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:sidedeck/engine/usb_output.dart';
 import 'package:sidedeck/state/dj_controller.dart';
 import 'package:sidedeck/theme/sidedeck_theme.dart';
 
@@ -83,7 +84,7 @@ class MixerStrip extends StatelessWidget {
   }
 
   Widget _externalCenter() {
-    final name = controller.usbDeviceName.split(' - ').last.trim();
+    final name = UsbOutput.deviceLabel(controller.usbDeviceName);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Column(
