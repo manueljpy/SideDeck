@@ -82,17 +82,15 @@ class MainActivity : FlutterActivity() {
 
     private fun findUsbOutput(context: Context): Map<String, Any> {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        for (d in devices) {
-            val maxCh = UsbDevices.maxChannels(am, d)
-            val usb = UsbDevices.isUsbOutput(d)
-            if (Log.isLoggable("sidedeck", Log.DEBUG)) {
-                Log.i(
+        if (Log.isLoggable("sidedeck", Log.DEBUG)) {
+            for (d in am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                Log.d(
                     "sidedeck",
                     "audio out id=${d.id} type=${d.type} name=${d.productName} " +
-                        "maxCh=$maxCh counts=[${d.channelCounts.joinToString()}] " +
+                        "maxCh=${UsbDevices.maxChannels(am, d)} " +
+                        "counts=[${d.channelCounts.joinToString()}] " +
                         "indexMasks=[${d.channelIndexMasks.joinToString { "0x" + Integer.toHexString(it) }}] " +
-                        "rates=[${d.sampleRates.joinToString()}] usb=$usb " +
+                        "rates=[${d.sampleRates.joinToString()}] usb=${UsbDevices.isUsbOutput(d)} " +
                         "mixer=[${mixerAttributesOf(am, d)}]",
                 )
             }
