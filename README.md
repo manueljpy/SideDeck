@@ -54,13 +54,15 @@ Output: `build/app/outputs/flutter-apk/app-debug.apk`
 Keylock (pitch-held tempo) is on by default. Cue points and hot cues exist
 in the engine; those controls are not on the live UI yet.
 
-## External mixer (EP-136)
+## External mixer
 
-1. Sidekick USB mode = **Multi** (not Controller)
-2. SideDeck settings → **Use EP-136**
-3. Speakers → Main, headphones → Cue on the hardware
+Turn on **Use external mixer** in Settings with a USB mixer plugged in. Deck A
+goes out on channels 1–2 and Deck B on channels 3–4 so you mix and cue on the
+hardware. The on-screen EQ and crossfader hide in this mode.
 
-The on-screen EQ and crossfader hide in this mode; you mix on the device.
+Works with USB mixers that take two stereo decks this way, including the
+Teenage Engineering EP-136 K.O. Sidekick (set USB mode to **Multi**, not
+Controller).
 
 ## Subsonic
 
