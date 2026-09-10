@@ -9,9 +9,12 @@ import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private var usbHotplug: UsbHotplug? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         keepScreenOn()
@@ -35,7 +38,8 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sidedeck/audio")
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        MethodChannel(messenger, "sidedeck/audio")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "usbOutputDevice" -> result.success(findUsbOutput(this))
@@ -52,9 +56,14 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        val hotplug = UsbHotplug(this)
+        usbHotplug = hotplug
+        EventChannel(messenger, "sidedeck/usb").setStreamHandler(hotplug)
     }
 
     override fun onDestroy() {
+        usbHotplug?.stop()
+        usbHotplug = null
         UsbPlayer.stop()
         super.onDestroy()
     }
@@ -74,36 +83,25 @@ class MainActivity : FlutterActivity() {
     private fun findUsbOutput(context: Context): Map<String, Any> {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        var best: AudioDeviceInfo? = null
-        var bestCh = 0
         for (d in devices) {
-            val counts = d.channelCounts
-            val maxCh = if (counts.isNotEmpty()) counts.max() else 0
-            val usb = d.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
-                d.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
-                d.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
+            val maxCh = UsbDevices.maxChannels(am, d)
+            val usb = UsbDevices.isUsbOutput(d)
             if (Log.isLoggable("sidedeck", Log.DEBUG)) {
                 Log.i(
                     "sidedeck",
                     "audio out id=${d.id} type=${d.type} name=${d.productName} " +
-                        "maxCh=$maxCh counts=[${counts.joinToString()}] " +
+                        "maxCh=$maxCh counts=[${d.channelCounts.joinToString()}] " +
                         "indexMasks=[${d.channelIndexMasks.joinToString { "0x" + Integer.toHexString(it) }}] " +
                         "rates=[${d.sampleRates.joinToString()}] usb=$usb " +
                         "mixer=[${mixerAttributesOf(am, d)}]",
                 )
             }
-            if (!usb) continue
-            val preferDevice = d.type == AudioDeviceInfo.TYPE_USB_DEVICE &&
-                best?.type != AudioDeviceInfo.TYPE_USB_DEVICE
-            if (maxCh > bestCh || (maxCh == bestCh && preferDevice)) {
-                best = d
-                bestCh = maxCh
-            }
         }
+        val best = UsbDevices.findBest(am)
         return mapOf(
-            "id" to (best?.id ?: 0),
-            "channels" to bestCh,
-            "name" to (best?.productName?.toString() ?: ""),
+            "id" to (best?.first?.id ?: 0),
+            "channels" to (best?.second ?: 0),
+            "name" to (best?.first?.productName?.toString() ?: ""),
         )
     }
 }

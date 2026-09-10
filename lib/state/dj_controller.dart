@@ -42,11 +42,16 @@ class DjController extends ChangeNotifier {
     if (!_engine.started) {
       engineError = 'Audio engine failed to start.';
     }
+    if (Platform.isAndroid) {
+      _usbSub = UsbOutput.events().listen(_onUsbEvent);
+    }
   }
 
   late final NativeEngine _engine;
   late final Timer _ticker;
+  StreamSubscription<UsbHotplugEvent>? _usbSub;
   final AnalysisCache _analysisCache = AnalysisCache.instance;
+  final Set<int> _declinedMixerIds = {};
 
   final DeckState deckA = DeckState();
   final DeckState deckB = DeckState();
@@ -54,6 +59,8 @@ class DjController extends ChangeNotifier {
   double master = 1.0;
   bool externalMixer = false;
   String usbDeviceName = '';
+  int usbDeviceId = 0;
+  UsbMixerOffer? mixerOffer;
   String? engineError;
   int? loadingDeck;
   String? loadingTitle;
@@ -63,6 +70,56 @@ class DjController extends ChangeNotifier {
 
   void clearError() {
     engineError = null;
+    notifyListeners();
+  }
+
+  void _onUsbEvent(UsbHotplugEvent event) {
+    if (event.attached) {
+      _onUsbAttached(event);
+    } else {
+      _onUsbDetached(event);
+    }
+  }
+
+  void _onUsbAttached(UsbHotplugEvent event) {
+    if (externalMixer) return;
+    if (_declinedMixerIds.contains(event.id)) return;
+    if (mixerOffer?.id == event.id) return;
+    mixerOffer = UsbMixerOffer(
+      id: event.id,
+      channels: event.channels,
+      name: event.name,
+    );
+    notifyListeners();
+  }
+
+  void _onUsbDetached(UsbHotplugEvent event) {
+    _declinedMixerIds.remove(event.id);
+    final offeringThis = mixerOffer?.id == event.id;
+    if (offeringThis) mixerOffer = null;
+    if (externalMixer && usbDeviceId == event.id) {
+      final name = UsbOutput.deviceLabel(
+        usbDeviceName.isEmpty ? event.name : usbDeviceName,
+      );
+      setExternalMixer(false).then((_) {
+        engineError = '$name disconnected; audio is back on the phone.';
+        notifyListeners();
+      });
+      return;
+    }
+    if (offeringThis) notifyListeners();
+  }
+
+  Future<void> acceptMixerOffer() async {
+    mixerOffer = null;
+    notifyListeners();
+    await setExternalMixer(true);
+  }
+
+  void declineMixerOffer() {
+    final id = mixerOffer?.id;
+    if (id != null) _declinedMixerIds.add(id);
+    mixerOffer = null;
     notifyListeners();
   }
 
@@ -450,9 +507,14 @@ class DjController extends ChangeNotifier {
   }
 
   Future<void> setExternalMixer(bool enabled) async {
+    if (mixerOffer != null) {
+      mixerOffer = null;
+      notifyListeners();
+    }
     var deviceId = 0;
     var usbChannels = 4;
     usbDeviceName = '';
+    usbDeviceId = 0;
     await UsbOutput.stopPlayback();
     if (enabled && Platform.isAndroid) {
       final usb = await UsbOutput.find();
@@ -471,6 +533,7 @@ class DjController extends ChangeNotifier {
       );
       externalMixer = res.ok;
       if (res.ok) {
+        usbDeviceId = res.routedId != 0 ? res.routedId : deviceId;
         if (res.routedName.isNotEmpty) usbDeviceName = res.routedName;
         engineError = null;
       } else {
@@ -493,6 +556,7 @@ class DjController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _usbSub?.cancel();
     _ticker.cancel();
     _nudgeHold[0]?.cancel();
     _nudgeHold[1]?.cancel();

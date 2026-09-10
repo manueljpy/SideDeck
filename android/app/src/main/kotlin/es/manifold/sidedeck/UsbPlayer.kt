@@ -86,6 +86,7 @@ object UsbPlayer {
         return mapOf(
             "ok" to ok,
             "channels" to actual,
+            "routedId" to (routed?.id ?: deviceId),
             "routedName" to (routed?.productName?.toString() ?: ""),
             "error" to if (ok) "" else "Only $actual channels available over USB",
         )
@@ -126,6 +127,7 @@ object UsbPlayer {
         return mapOf(
             "ok" to false,
             "channels" to 0,
+            "routedId" to 0,
             "routedName" to "",
             "error" to message,
         )
@@ -134,12 +136,9 @@ object UsbPlayer {
     private fun findDevice(am: AudioManager, deviceId: Int): AudioDeviceInfo? {
         val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         return outputs.firstOrNull { it.id == deviceId }
-            ?: outputs.filter { isUsb(it) }.maxByOrNull { it.channelCounts.maxOrNull() ?: 0 }
+            ?: outputs.filter { UsbDevices.isUsbOutput(it) }
+                .maxByOrNull { UsbDevices.maxChannels(am, it) }
     }
-
-    private fun isUsb(d: AudioDeviceInfo) = d.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
-        d.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
-        d.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
 
     @RequiresApi(34)
     private fun openViaMixerAttributes(

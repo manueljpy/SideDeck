@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sidedeck/engine/usb_output.dart';
 import 'package:sidedeck/state/dj_controller.dart';
 import 'package:sidedeck/subsonic/subsonic_client.dart';
 import 'package:sidedeck/theme/sidedeck_theme.dart';
@@ -19,12 +20,6 @@ class _SettingsPageState extends State<SettingsPage> {
   final _pass = TextEditingController();
   String? _status;
   bool _busy = false;
-
-  /// Android names USB outputs like "USB-Audio - EP-136"; show just the hardware.
-  static String _deviceLabel(String name) {
-    final trimmed = name.split(' - ').last.trim();
-    return trimmed.isEmpty ? 'mixer' : trimmed;
-  }
 
   @override
   void initState() {
@@ -99,7 +94,7 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: Text(
               widget.dj.externalMixer
                   ? 'ON — Deck A → channel 1, Deck B → channel 2 on the '
-                      '${_deviceLabel(widget.dj.usbDeviceName)}'
+                      '${UsbOutput.deviceLabel(widget.dj.usbDeviceName)}'
                   : 'OFF — audio stays on the phone',
             ),
             value: widget.dj.externalMixer,
