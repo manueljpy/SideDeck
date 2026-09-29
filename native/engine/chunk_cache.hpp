@@ -510,13 +510,17 @@ struct ChunkCache {
   // whenever the target is close and ahead.
   bool seekNativeTo(StreamingDecoder& dec, int64_t nativeStart) {
     constexpr int64_t kMp3Frame = 1152;
+    constexpr int64_t kAacFrame = 1024;
     // Opus post-seek decode can differ slightly from a continuous decode;
     // come in early and discard so the audible frames match.
     constexpr int64_t kOpusPreroll = 2 * 2880;
     const bool isMp3 = dec.kind == StreamingDecoder::Kind::Mp3;
     const bool isOpus = dec.kind == StreamingDecoder::Kind::Opus;
-    const int64_t maxSkip =
-        isMp3 ? 29 * kMp3Frame : (isOpus ? 2 * kOpusPreroll : (int64_t)8192);
+    const bool isM4a = dec.kind == StreamingDecoder::Kind::M4a;
+    const int64_t maxSkip = isMp3   ? 29 * kMp3Frame
+                            : isOpus ? 2 * kOpusPreroll
+                            : isM4a  ? 8 * kAacFrame
+                                     : (int64_t)8192;
     const int64_t cur = (int64_t)dec.tell();
     if (cur == nativeStart) {
       return true;
@@ -531,12 +535,15 @@ struct ChunkCache {
     // reservoir backreference is under two MP3 frames at any bitrate, plus one
     // for the synthesis filterbank overlap. Without a table a seek restarts
     // the file anyway, so come in from much further back. Opus always uses a
-    // fixed preroll; FLAC/WAV are sample-accurate and need none.
+    // fixed preroll; MediaCodec AAC seek discards to the target internally,
+    // so a small preroll is enough. FLAC/WAV are sample-accurate and need none.
     int64_t preroll = 0;
     if (isMp3) {
       preroll = dec.hasSeekTable() ? 4 * kMp3Frame : 29 * kMp3Frame;
     } else if (isOpus) {
       preroll = kOpusPreroll;
+    } else if (isM4a) {
+      preroll = 2 * kAacFrame;
     }
     const int64_t restart = std::max<int64_t>(0, nativeStart - preroll);
     if (!dec.seek((uint64_t)restart)) {

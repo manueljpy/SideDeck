@@ -2,23 +2,32 @@
 
 // Streaming decoder for local files. Include after dr_mp3 / dr_wav / dr_flac
 // and (for Opus) opusfile.h. Keep the decoder open, seek, read chunks.
+// On Android, AAC-in-M4A uses MediaCodec (see mediacodec_aac.hpp).
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
+#ifdef __ANDROID__
+#include "mediacodec_aac.hpp"
+#endif
+
 struct StreamingDecoder {
-  enum class Kind { None, Wav, Mp3, Flac, Opus };
+  enum class Kind { None, Wav, Mp3, Flac, Opus, M4a };
 
   Kind kind = Kind::None;
   drwav wav{};
   drmp3 mp3{};
   drflac* flac = nullptr;
   OggOpusFile* opus = nullptr;
+#ifdef __ANDROID__
+  std::unique_ptr<MediaCodecAacDecoder> aac;
+#endif
   unsigned channels = 0;
   unsigned sampleRate = 0;
   uint64_t totalFrames = 0;
@@ -40,8 +49,17 @@ struct StreamingDecoder {
     } else if (kind == Kind::Opus && opus) {
       op_free(opus);
     }
+#ifdef __ANDROID__
+    else if (kind == Kind::M4a && aac) {
+      aac->close();
+      aac.reset();
+    }
+#endif
     flac = nullptr;
     opus = nullptr;
+#ifdef __ANDROID__
+    aac.reset();
+#endif
     kind = Kind::None;
     channels = 0;
     sampleRate = 0;
@@ -83,6 +101,17 @@ struct StreamingDecoder {
     if (isOgg(head, nHead) || extIs(path, ".opus") || extIs(path, ".ogg")) {
       return tryOpus(path);
     }
+#ifdef __ANDROID__
+    // ISO BMFF (ftyp) or explicit AAC/M4A extensions — MediaCodec only.
+    if (isFtyp(head, nHead) || extIs(path, ".m4a") || extIs(path, ".aac") ||
+        extIs(path, ".m4b") || extIs(path, ".mp4")) {
+      if (tryM4a(path)) {
+        return true;
+      }
+      // Video-only / ALAC / non-AAC mp4 should not fall through to MP3.
+      return false;
+    }
+#endif
     if (isFlac(head, nHead) || extIs(path, ".flac")) {
       if (tryFlac(path)) {
         return true;
@@ -121,6 +150,11 @@ struct StreamingDecoder {
       const ogg_int64_t pos = op_pcm_tell(opus);
       return pos < 0 ? 0 : (uint64_t)pos;
     }
+#ifdef __ANDROID__
+    if (kind == Kind::M4a && aac) {
+      return aac->tell();
+    }
+#endif
     return 0;
   }
 
@@ -140,6 +174,11 @@ struct StreamingDecoder {
     if (kind == Kind::Opus && opus) {
       return op_pcm_seek(opus, (ogg_int64_t)frame) == 0;
     }
+#ifdef __ANDROID__
+    if (kind == Kind::M4a && aac) {
+      return aac->seek(frame);
+    }
+#endif
     return false;
   }
 
@@ -165,6 +204,11 @@ struct StreamingDecoder {
  private:
   // One shot at the underlying codec. Opus may return far fewer than requested.
   uint64_t readStereoOnce(float* out, uint64_t frames) {
+#ifdef __ANDROID__
+    if (kind == Kind::M4a && aac) {
+      return aac->readStereo(out, frames);
+    }
+#endif
     if (kind == Kind::Opus && opus) {
       if (channels >= 2) {
         const int n = op_read_float_stereo(opus, out, (int)frames * 2);
@@ -219,6 +263,11 @@ struct StreamingDecoder {
     return n >= 4 && b[0] == 'O' && b[1] == 'g' && b[2] == 'g' && b[3] == 'S';
   }
 
+  // ISO Base Media File Format (M4A / MP4 / M4B): size(4) + 'ftyp'.
+  static bool isFtyp(const unsigned char* b, size_t n) {
+    return n >= 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p';
+  }
+
   bool tryKind(Kind k, const char* path) {
     switch (k) {
       case Kind::Wav:
@@ -229,8 +278,16 @@ struct StreamingDecoder {
         return tryOpus(path);
       case Kind::Mp3:
         return tryMp3(path);
+#ifdef __ANDROID__
+      case Kind::M4a:
+        return tryM4a(path);
+#endif
       case Kind::None:
         return false;
+#ifndef __ANDROID__
+      case Kind::M4a:
+        return false;
+#endif
     }
     return false;
   }
@@ -325,6 +382,18 @@ struct StreamingDecoder {
     }
     return true;
   }
+
+#ifdef __ANDROID__
+  bool tryM4a(const char* path) {
+    auto dec = std::make_unique<MediaCodecAacDecoder>();
+    if (!dec->open(path)) {
+      return false;
+    }
+    kind = Kind::M4a;
+    aac = std::move(dec);
+    return acceptOpen(aac->channels, aac->sampleRate, aac->totalFrames);
+  }
+#endif
 };
 
 inline void scanWaveform(StreamingDecoder& dec, int bins, std::vector<float>& waveMin,

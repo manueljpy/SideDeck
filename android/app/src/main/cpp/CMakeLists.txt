@@ -40,5 +40,6 @@ target_link_libraries(dj_engine
   oboe
   opusfile
   android
+  mediandk
   ${log-lib}
 )

@@ -235,11 +235,6 @@ class SubsonicClient {
     if (kind == 'error') {
       throw Exception('Server returned an error instead of audio');
     }
-    if (kind == 'm4a') {
-      throw Exception(
-        'Got $kind audio. SideDeck needs MP3, WAV, FLAC, or Opus — enable MP3 transcoding (ffmpeg) on the server.',
-      );
-    }
     await file.writeAsBytes(bytes, flush: true);
     return file.path;
   }
