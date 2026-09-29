@@ -57,9 +57,6 @@ struct StreamingDecoder {
 #endif
     flac = nullptr;
     opus = nullptr;
-#ifdef __ANDROID__
-    aac.reset();
-#endif
     kind = Kind::None;
     channels = 0;
     sampleRate = 0;

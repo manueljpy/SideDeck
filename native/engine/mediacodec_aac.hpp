@@ -9,12 +9,10 @@
 #include <media/NdkMediaFormat.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
-#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -48,7 +46,6 @@ struct MediaCodecAacDecoder {
   int32_t pcmEncoding = kAudioFormatPcm16bit;
   bool inputEos = false;
   bool outputEos = false;
-  bool sawOutputFormat = false;
 
   // Decoded stereo float not yet consumed by readStereo.
   std::vector<float> pending;
@@ -80,7 +77,6 @@ struct MediaCodecAacDecoder {
     pcmEncoding = kAudioFormatPcm16bit;
     inputEos = false;
     outputEos = false;
-    sawOutputFormat = false;
     pending.clear();
     pendingRead = 0;
   }
@@ -250,29 +246,55 @@ struct MediaCodecAacDecoder {
     inputEos = false;
     outputEos = false;
 
+    // sampleTime is 0 at t=0; <0 means no current sample after seek.
     const int64_t sampleTime = AMediaExtractor_getSampleTime(extractor);
     uint64_t approx = 0;
-    if (sampleTime > 0) {
+    if (sampleTime < 0) {
+      if (frame > 0) {
+        // Extractor/codec already moved; reset to a consistent start before failing.
+        resetToStartAfterFailedSeek();
+        return false;
+      }
+    } else {
       approx = (uint64_t)((double)sampleTime * (double)sampleRate / 1000000.0);
     }
     pcmCursor = approx;
-    if (frame > pcmCursor) {
-      const uint64_t need = frame - pcmCursor;
-      std::vector<float> dump((size_t)need * 2);
-      readStereo(dump.data(), need);
+    // Must land at or before the target so callers (chunk cache) can discard
+    // forward to the exact frame. Past-target means we can't recover by reading.
+    if (pcmCursor > frame) {
+      resetToStartAfterFailedSeek();
+      return false;
     }
-    pcmCursor = frame;
-    return true;
+    if (pcmCursor == frame) {
+      return true;
+    }
+    // Discard forward in fixed chunks so a bad approx cannot OOM.
+    constexpr uint64_t kDiscardChunk = 4096;
+    std::vector<float> dump((size_t)kDiscardChunk * 2);
+    while (pcmCursor < frame) {
+      const uint64_t need = frame - pcmCursor;
+      const uint64_t n = std::min(need, kDiscardChunk);
+      const uint64_t got = readStereo(dump.data(), n);
+      if (got < n) {
+        // readStereo advanced pcmCursor honestly; leave decoder there.
+        return false;
+      }
+    }
+    return pcmCursor == frame;
   }
 
   uint64_t readStereo(float* out, uint64_t frames) {
-    if (!out || frames == 0 || !codec || channels == 0 || outputEos) {
+    if (!out || frames == 0 || !codec || channels == 0) {
       return 0;
     }
     uint64_t got = 0;
     while (got < frames) {
       drainPending(out + got * 2, frames - got, got);
       if (got >= frames) {
+        break;
+      }
+      // Drain any leftover PCM after EOS before giving up.
+      if (outputEos) {
         break;
       }
       if (!pump()) {
@@ -283,6 +305,22 @@ struct MediaCodecAacDecoder {
   }
 
  private:
+  // After a failed mid-file seekTo, extractor/codec may already be moved while
+  // pcmCursor still reflects the old position. Snap back to t=0 so tell() matches.
+  void resetToStartAfterFailedSeek() {
+    if (extractor) {
+      AMediaExtractor_seekTo(extractor, 0, AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC);
+    }
+    if (codec) {
+      AMediaCodec_flush(codec);
+    }
+    pending.clear();
+    pendingRead = 0;
+    inputEos = false;
+    outputEos = false;
+    pcmCursor = 0;
+  }
+
   void drainPending(float* out, uint64_t want, uint64_t& got) {
     const size_t available = pending.size() / 2 - pendingRead;
     const size_t n = (size_t)std::min<uint64_t>(want, (uint64_t)available);
@@ -446,7 +484,6 @@ struct MediaCodecAacDecoder {
           sampleRate = (unsigned)sr;
         }
         AMediaFormat_delete(outFmt);
-        sawOutputFormat = true;
       }
       return true;
     }
