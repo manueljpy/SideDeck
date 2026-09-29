@@ -1,0 +1,2 @@
+- Added AAC / M4A support (ALAC when the device can decode it)
+- Prompt to enable mixer mode when a USB device is connected
