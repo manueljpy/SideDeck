@@ -3,6 +3,7 @@
 #include "analyze.hpp"
 #include "biquad.hpp"
 #include "id3_meta.hpp"
+#include "last_error.hpp"
 
 #include "signalsmith-stretch.h"
 #include <oboe/Oboe.h>
@@ -918,7 +919,9 @@ int dj_load(DjEngine engine, int deck, const char* path) {
 
 int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm, int key,
                           float beat_offset) {
+  djClearLastError();
   if (deck < 0 || deck > 1 || !path) {
+    djSetLastError("Invalid deck or path.");
     return 0;
   }
   auto* e = asEngine(engine);
@@ -933,6 +936,9 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
     const id3_meta::Tags tags = id3_meta::read(path);
     auto prefix = Engine::decodeAnalyzeMono(path, (int)analyze_detail::kAnalyzeSr);
     if (prefix.empty()) {
+      if (djGetLastError()[0] == '\0') {
+        djSetLastError("Couldn't decode this file.");
+      }
       return 0;
     }
     analysis =
@@ -951,6 +957,9 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
     d.pauseXf = false;
   }
   if (!d.cache.open(path, sr)) {
+    if (djGetLastError()[0] == '\0') {
+      djSetLastError("Couldn't open this file for playback.");
+    }
     return 0;
   }
   d.cache.hintEngineFrames(0, (int64_t)sr * 2);
@@ -960,6 +969,9 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
     StreamingDecoder scan;
     if (!scan.open(path)) {
       d.cache.stop();
+      if (djGetLastError()[0] == '\0') {
+        djSetLastError("Couldn't open this file for playback.");
+      }
       return 0;
     }
     scanWaveform(scan, kWaveformBins, wmin, wmax);
@@ -998,6 +1010,8 @@ int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm
   LOGI("loaded deck %d frames=%lld bpm=%.2f key=%d", deck, (long long)d.totalFrames, d.bpm, d.key);
   return d.loaded ? 1 : 0;
 }
+
+const char* dj_last_error(void) { return djGetLastError(); }
 
 int dj_analyze_file(const char* path, float* bpm, int* key, float* beat_offset) {
   if (!path) {

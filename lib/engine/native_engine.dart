@@ -11,6 +11,7 @@ typedef _StopC = Void Function(Pointer<Void>);
 typedef _SetModeC = Int32 Function(Pointer<Void>, Int32);
 typedef _GetIntC = Int32 Function(Pointer<Void>);
 typedef _LoadC = Int32 Function(Pointer<Void>, Int32, Pointer<Utf8>);
+typedef _LastErrorC = Pointer<Utf8> Function();
 typedef _LoadAnalyzedC = Int32 Function(
   Pointer<Void>,
   Int32,
@@ -69,6 +70,8 @@ class NativeEngine {
       .lookupFunction<_LoadC, int Function(Pointer<Void>, int, Pointer<Utf8>)>(
         'dj_load',
       );
+  late final _lastError = _lib
+      .lookupFunction<_LastErrorC, Pointer<Utf8> Function()>('dj_last_error');
   late final _loadAnalyzed = _lib.lookupFunction<
     _LoadAnalyzedC,
     int Function(Pointer<Void>, int, Pointer<Utf8>, double, int, double)
@@ -202,6 +205,13 @@ class NativeEngine {
     } finally {
       malloc.free(p);
     }
+  }
+
+  /// Reason for the last failed [load], or empty if none / success.
+  String lastError() {
+    final ptr = _lastError();
+    if (ptr == nullptr) return '';
+    return ptr.toDartString();
   }
 
   void unload(int deck) => _unload(_handle, deck);

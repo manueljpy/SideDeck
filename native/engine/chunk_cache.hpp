@@ -535,7 +535,7 @@ struct ChunkCache {
     // reservoir backreference is under two MP3 frames at any bitrate, plus one
     // for the synthesis filterbank overlap. Without a table a seek restarts
     // the file anyway, so come in from much further back. Opus always uses a
-    // fixed preroll; MediaCodec AAC seek discards to the target internally,
+    // fixed preroll; MediaCodec AAC/ALAC seek discards to the target internally,
     // so a small preroll is enough. FLAC/WAV are sample-accurate and need none.
     int64_t preroll = 0;
     if (isMp3) {

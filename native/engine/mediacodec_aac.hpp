@@ -1,12 +1,14 @@
 #pragma once
 
-// AAC-in-M4A (and ADTS .aac) via Android NDK MediaExtractor + MediaCodec.
-// Same approach as Algoriddim djay: OS decoder for AAC, no patented codec in the APK.
+// AAC / ALAC in M4A (and ADTS .aac) via Android NDK MediaExtractor + MediaCodec.
+// Same approach as Algoriddim djay: OS decoder, no patented codec in the APK.
 
 #include <android/log.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaExtractor.h>
 #include <media/NdkMediaFormat.h>
+
+#include "last_error.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +48,7 @@ struct MediaCodecAacDecoder {
   int32_t pcmEncoding = kAudioFormatPcm16bit;
   bool inputEos = false;
   bool outputEos = false;
+  bool isAlac = false;
 
   // Decoded stereo float not yet consumed by readStereo.
   std::vector<float> pending;
@@ -77,6 +80,7 @@ struct MediaCodecAacDecoder {
     pcmEncoding = kAudioFormatPcm16bit;
     inputEos = false;
     outputEos = false;
+    isAlac = false;
     pending.clear();
     pendingRead = 0;
   }
@@ -93,8 +97,13 @@ struct MediaCodecAacDecoder {
     if (!mime) {
       return false;
     }
+    // Android softALAC / vendor decoders use audio/alac; a few stacks alias others.
     return std::strcmp(mime, "audio/alac") == 0 || std::strcmp(mime, "audio/x-alac") == 0 ||
            std::strcmp(mime, "audio/mp4a-alac") == 0;
+  }
+
+  static bool mimeIsSupported(const char* mime) {
+    return mimeIsAac(mime) || mimeIsAlac(mime);
   }
 
   bool open(const char* path) {
@@ -142,17 +151,11 @@ struct MediaCodecAacDecoder {
         AMediaFormat_delete(f);
         continue;
       }
-      if (mimeIsAlac(m)) {
-        AMediaFormat_delete(f);
-        __android_log_print(ANDROID_LOG_WARN, "sidedeck",
-                            "m4a/ALAC is not supported (AAC only): %s", path);
-        close();
-        return false;
-      }
-      if (mimeIsAac(m)) {
+      if (mimeIsSupported(m)) {
         audioTrack = i;
         format = f;
         mime = m;
+        isAlac = mimeIsAlac(m);
         break;
       }
       AMediaFormat_delete(f);
@@ -167,15 +170,18 @@ struct MediaCodecAacDecoder {
 
     // Absurd encoder-delay values (common on ffmpeg AAC under Android 9+) make
     // the decoder emit silence / empty buffers. Cap to a realistic AAC delay.
-    int32_t encDelay = 0;
-    if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_ENCODER_DELAY, &encDelay) &&
-        encDelay > 4096) {
-      AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_ENCODER_DELAY, 0);
-    }
-    int32_t encPad = 0;
-    if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_ENCODER_PADDING, &encPad) &&
-        encPad > 4096) {
-      AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_ENCODER_PADDING, 0);
+    // ALAC has no encoder delay in practice; leave tags alone for it.
+    if (!isAlac) {
+      int32_t encDelay = 0;
+      if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_ENCODER_DELAY, &encDelay) &&
+          encDelay > 4096) {
+        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_ENCODER_DELAY, 0);
+      }
+      int32_t encPad = 0;
+      if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_ENCODER_PADDING, &encPad) &&
+          encPad > 4096) {
+        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_ENCODER_PADDING, 0);
+      }
     }
 
     int32_t ch = 0;
@@ -194,11 +200,27 @@ struct MediaCodecAacDecoder {
 
     codec = AMediaCodec_createDecoderByType(mime);
     if (!codec) {
+      if (isAlac) {
+        djSetLastError(
+            "ALAC (Apple Lossless) isn't supported on this phone. Use AAC .m4a or FLAC.");
+      } else {
+        djSetLastError("Couldn't create a decoder for this M4A/AAC file.");
+      }
+      __android_log_print(ANDROID_LOG_WARN, "sidedeck",
+                          "MediaCodec has no decoder for %s: %s", mime, path);
       AMediaFormat_delete(format);
       close();
       return false;
     }
     if (AMediaCodec_configure(codec, format, nullptr, nullptr, 0) != AMEDIA_OK) {
+      if (isAlac) {
+        djSetLastError(
+            "ALAC (Apple Lossless) isn't supported on this phone. Use AAC .m4a or FLAC.");
+      } else {
+        djSetLastError("Couldn't decode this M4A/AAC file.");
+      }
+      __android_log_print(ANDROID_LOG_WARN, "sidedeck",
+                          "MediaCodec configure failed for %s: %s", mime, path);
       AMediaFormat_delete(format);
       close();
       return false;

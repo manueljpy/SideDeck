@@ -68,6 +68,9 @@ double dj_file_duration(const char* path);
 int dj_load_with_analysis(DjEngine engine, int deck, const char* path, float bpm, int key,
                           float beat_offset);
 
+/** Null-terminated reason for the last failed dj_load / open, or "". */
+const char* dj_last_error(void);
+
 #ifdef __cplusplus
 }
 #endif

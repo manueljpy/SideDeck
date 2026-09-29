@@ -172,8 +172,11 @@ class DjController extends ChangeNotifier {
       loadingDeck = null;
       loadingTitle = null;
       loadingPath = null;
-      engineError =
-          'Could not decode ${title ?? path.split(RegExp(r'[\\/]')).last} (MP3, WAV, FLAC, or Opus required).';
+      final name = title ?? path.split(RegExp(r'[\\/]')).last;
+      final detail = _engine.lastError();
+      engineError = detail.isNotEmpty
+          ? 'Could not load $name - $detail'
+          : 'Could not decode $name (need MP3, WAV, FLAC, Opus, or AAC M4A).';
       notifyListeners();
       return false;
     }

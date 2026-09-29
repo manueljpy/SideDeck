@@ -2,7 +2,7 @@
 
 // Streaming decoder for local files. Include after dr_mp3 / dr_wav / dr_flac
 // and (for Opus) opusfile.h. Keep the decoder open, seek, read chunks.
-// On Android, AAC-in-M4A uses MediaCodec (see mediacodec_aac.hpp).
+// On Android, AAC/ALAC-in-M4A uses MediaCodec (see mediacodec_aac.hpp).
 
 #include <algorithm>
 #include <cctype>
@@ -12,6 +12,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "last_error.hpp"
 
 #ifdef __ANDROID__
 #include "mediacodec_aac.hpp"
@@ -99,13 +101,17 @@ struct StreamingDecoder {
       return tryOpus(path);
     }
 #ifdef __ANDROID__
-    // ISO BMFF (ftyp) or explicit AAC/M4A extensions — MediaCodec only.
+    // ISO BMFF (ftyp) or explicit M4A/AAC extensions — MediaCodec (AAC or ALAC).
     if (isFtyp(head, nHead) || extIs(path, ".m4a") || extIs(path, ".aac") ||
         extIs(path, ".m4b") || extIs(path, ".mp4")) {
       if (tryM4a(path)) {
         return true;
       }
-      // Video-only / ALAC / non-AAC mp4 should not fall through to MP3.
+      // tryM4a / MediaCodec may already have set a specific reason (e.g. ALAC).
+      if (djGetLastError()[0] == '\0') {
+        djSetLastError("Couldn't open this M4A/AAC file.");
+      }
+      // Video-only / unsupported codecs should not fall through to MP3.
       return false;
     }
 #endif
