@@ -207,11 +207,13 @@ object UsbPlayer {
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
-        val encodings = intArrayOf(
-            AudioFormat.ENCODING_PCM_32BIT,
-            AudioFormat.ENCODING_PCM_FLOAT,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
+        val encodings = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(AudioFormat.ENCODING_PCM_32BIT)
+            }
+            add(AudioFormat.ENCODING_PCM_FLOAT)
+            add(AudioFormat.ENCODING_PCM_16BIT)
+        }
         val hasIndexMasks = device?.channelIndexMasks?.isNotEmpty() == true
         val counts = linkedSetOf(if (channels >= 8) 8 else 4, 4, 8)
 
