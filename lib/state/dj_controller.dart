@@ -273,8 +273,17 @@ class DjController extends ChangeNotifier {
       return;
     }
 
+    seekTo(deckIndex, target);
+  }
+
+  /// Absolute seek (overview scrub / pause nudge). Ignores beat-jump mode.
+  void seekTo(int deckIndex, double seconds) {
+    final d = deck(deckIndex);
+    if (!d.loaded) return;
+    final target = seconds.clamp(0.0, math.max(0.0, d.duration)).toDouble();
     _engine.seek(deckIndex, target);
     d.position = target;
+    _readLoop(deckIndex);
     notifyListeners();
   }
 

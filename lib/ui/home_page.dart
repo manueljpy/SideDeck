@@ -254,6 +254,7 @@ class _HomePageState extends State<HomePage> {
                   loopStart: d.loopStart,
                   loopEnd: d.loopEnd,
                   onSeek: d.loaded ? (t) => _dj.seek(i, t) : null,
+                  onOverviewSeek: d.loaded ? (t) => _dj.seekTo(i, t) : null,
                 ),
                 if (!d.loaded)
                   Positioned.fill(

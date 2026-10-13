@@ -355,6 +355,7 @@ class WaveformView extends StatelessWidget {
     this.loopStart = 0,
     this.loopEnd = 0,
     this.onSeek,
+    this.onOverviewSeek,
   });
 
   final Float32List min;
@@ -368,7 +369,10 @@ class WaveformView extends StatelessWidget {
   final bool loopEnabled;
   final double loopStart;
   final double loopEnd;
+  /// Zoomed jump-zone tap (typically ±4 beat jump toward the tap).
   final ValueChanged<double>? onSeek;
+  /// Full-track overview strip tap → absolute position in seconds.
+  final ValueChanged<double>? onOverviewSeek;
 
   static const zoom = 8.0;
 
@@ -398,11 +402,17 @@ class WaveformView extends StatelessWidget {
           ),
           size: Size(w, h),
         );
-        if (onSeek == null || duration <= 0) return paint;
+        if ((onSeek == null && onOverviewSeek == null) || duration <= 0) {
+          return paint;
+        }
         return GestureDetector(
           onTapDown: (d) {
-            if (d.localPosition.dy < WaveformPainter.overviewH) return;
             final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
+            if (d.localPosition.dy < WaveformPainter.overviewH) {
+              onOverviewSeek?.call(nx * duration);
+              return;
+            }
+            if (onSeek == null) return;
             if ((nx - 0.5).abs() > WaveformPainter.jumpHalf) return;
             final playRate = rate.clamp(0.5, 2.0);
             final heard = (nx - 0.5) * zoom;
