@@ -1,8 +1,8 @@
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:sidedeck/engine/native_lib.dart';
 
 class TrackAnalysis {
   const TrackAnalysis({
@@ -23,11 +23,7 @@ typedef _AnalyzeC = Int32 Function(
   Pointer<Float>,
 );
 
-DynamicLibrary _openLib() {
-  return Platform.isAndroid
-      ? DynamicLibrary.open('libdj_engine.so')
-      : DynamicLibrary.process();
-}
+DynamicLibrary _openLib() => openDjEngine();
 
 /// Decode + BPM/key. No deck involved. Safe to call from a worker isolate.
 TrackAnalysis? analyzeTrackFile(String path) {

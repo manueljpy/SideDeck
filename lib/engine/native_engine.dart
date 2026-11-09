@@ -1,8 +1,8 @@
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:sidedeck/engine/native_lib.dart';
 
 typedef _CreateC = Pointer<Void> Function();
 typedef _DestroyC = Void Function(Pointer<Void>);
@@ -157,11 +157,24 @@ class NativeEngine {
       >('dj_waveform_copy');
 
   static NativeEngine open() {
-    final lib = Platform.isAndroid
-        ? DynamicLibrary.open('libdj_engine.so')
-        : DynamicLibrary.process();
-    final create = lib.lookupFunction<_CreateC, _CreateC>('dj_create');
+    late final DynamicLibrary lib;
+    try {
+      lib = openDjEngine();
+    } catch (e) {
+      throw StateError('Failed to open dj_engine library: $e');
+    }
+    late final Pointer<Void> Function() create;
+    try {
+      create = lib.lookupFunction<_CreateC, _CreateC>('dj_create');
+    } catch (e) {
+      throw StateError(
+        'dj_create missing — native engine not linked into the iOS binary: $e',
+      );
+    }
     final handle = create();
+    if (handle.address == 0) {
+      throw StateError('dj_create returned null');
+    }
     final engine = NativeEngine._(lib, handle);
     engine.started = engine._start(handle) == 1;
     return engine;

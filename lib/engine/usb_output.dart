@@ -63,7 +63,7 @@ class UsbOutput {
   static Stream<UsbHotplugEvent>? _hotplug;
 
   static Stream<UsbHotplugEvent> events() {
-    if (!Platform.isAndroid) return const Stream.empty();
+    if (!Platform.isAndroid && !Platform.isIOS) return const Stream.empty();
     return _hotplug ??= _events.receiveBroadcastStream().map((raw) {
       final map = raw is Map ? raw : const {};
       return UsbHotplugEvent(
@@ -108,7 +108,7 @@ class UsbOutput {
           channels: 0,
           routedId: 0,
           routedName: '',
-          error: 'No response from Android audio',
+          error: 'No response from native audio',
         );
       }
       return UsbStartResult(

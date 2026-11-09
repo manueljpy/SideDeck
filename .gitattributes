@@ -1,0 +1,4 @@
+*.sh text eol=lf
+*.mm text eol=lf
+*.h text eol=lf
+ios/engine/build_engine.sh text eol=lf

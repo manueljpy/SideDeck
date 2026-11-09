@@ -84,7 +84,7 @@ class _SettingsPageState extends State<SettingsPage> {
             'Turn this on with a USB mixer plugged into the phone. Deck A and Deck B '
             'go out as separate channels so you mix and cue on the hardware — the '
             'on-screen EQ/crossfader hides. Works with devices such as the EP-136 '
-            '(set USB mode to Multi).',
+            '(set USB mode to Multi). iPhone needs USB-C or a Lightning camera adapter.',
             style: TextStyle(color: SideDeckTheme.muted, fontSize: 12, height: 1.4),
           ),
           const SizedBox(height: 8),
@@ -99,8 +99,15 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             value: widget.dj.externalMixer,
             onChanged: (v) async {
+              final messenger = ScaffoldMessenger.of(context);
               await widget.dj.setExternalMixer(v);
-              if (mounted) setState(() {});
+              if (!mounted) return;
+              setState(() {});
+              final err = widget.dj.engineError;
+              if (err != null) {
+                messenger.showSnackBar(SnackBar(content: Text(err)));
+                widget.dj.clearError();
+              }
             },
           ),
           const Divider(height: 32),

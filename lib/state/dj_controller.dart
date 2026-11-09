@@ -42,9 +42,7 @@ class DjController extends ChangeNotifier {
     if (!_engine.started) {
       engineError = 'Audio engine failed to start.';
     }
-    if (Platform.isAndroid) {
-      _usbSub = UsbOutput.events().listen(_onUsbEvent);
-    }
+    _usbSub = UsbOutput.events().listen(_onUsbEvent);
   }
 
   late final NativeEngine _engine;
@@ -528,7 +526,7 @@ class DjController extends ChangeNotifier {
     usbDeviceName = '';
     usbDeviceId = 0;
     await UsbOutput.stopPlayback();
-    if (enabled && Platform.isAndroid) {
+    if (enabled) {
       final usb = await UsbOutput.find();
       if (usb != null) {
         deviceId = usb.id;
@@ -556,8 +554,20 @@ class DjController extends ChangeNotifier {
         _engine.setExternalMixer(false);
         externalMixer = false;
       }
+    } else if (enabled && prepared && Platform.isIOS) {
+      if (deviceId == 0) {
+        _engine.setExternalMixer(false);
+        externalMixer = false;
+        engineError =
+            'No USB mixer detected; audio stayed on the phone.';
+      } else {
+        externalMixer = true;
+        usbDeviceId = deviceId;
+        engineError = null;
+      }
     } else if (enabled && !prepared) {
-      engineError = '4-channel USB open failed; audio stayed on phone stereo.';
+      engineError =
+          'Could not open 4-channel USB output; audio stayed on the phone.';
       externalMixer = false;
     } else {
       externalMixer = false;

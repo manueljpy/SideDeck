@@ -2,7 +2,9 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sidedeck/engine/analysis_cache.dart';
@@ -100,7 +102,12 @@ class LibraryController extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       folderPath = prefs.getString('library_folder');
       final extra = prefs.getStringList('library_paths') ?? [];
+      if (Platform.isIOS) {
+        final docs = await getApplicationDocumentsDirectory();
+        await scanDirectory(docs.path, persist: false);
+      }
       if (folderPath != null && folderPath!.isNotEmpty) {
+        await _iosAccess(folderPath!);
         await scanDirectory(folderPath!, persist: false);
       }
       for (final path in extra) {
@@ -111,6 +118,44 @@ class LibraryController extends ChangeNotifier {
     }
     loading = false;
     _emit();
+  }
+
+  static const _iosIo = MethodChannel('sidedeck/audio');
+
+  Future<void> _iosAccess(String path) async {
+    if (!Platform.isIOS) return;
+    try {
+      await _iosIo.invokeMethod<bool>('accessPath', path);
+    } catch (_) {}
+  }
+
+  /// iOS document-picker paths live in tmp; copy into Documents so they survive.
+  Future<String> _durablePath(String path) async {
+    if (!Platform.isIOS) return path;
+    final docs = await getApplicationDocumentsDirectory();
+    if (p.isWithin(docs.path, path) || p.equals(p.normalize(docs.path), p.normalize(path))) {
+      return path;
+    }
+    final libDir = Directory(p.join(docs.path, 'library'));
+    await libDir.create(recursive: true);
+    var dest = p.join(libDir.path, p.basename(path));
+    if (p.equals(p.normalize(path), p.normalize(dest))) return path;
+    try {
+      if (await File(dest).exists() &&
+          await File(path).length() == await File(dest).length()) {
+        return dest;
+      }
+      if (await File(dest).exists()) {
+        dest = p.join(
+          libDir.path,
+          '${p.basenameWithoutExtension(path)}_${DateTime.now().millisecondsSinceEpoch}${p.extension(path)}',
+        );
+      }
+      await File(path).copy(dest);
+      return dest;
+    } catch (_) {
+      return path;
+    }
   }
 
   Future<void> _persist() async {
@@ -147,7 +192,7 @@ class LibraryController extends ChangeNotifier {
       for (final f in result.files) {
         final path = f.path;
         if (path == null) continue;
-        await _addPath(path);
+        await _addPath(await _durablePath(path));
       }
       await _persist();
     } catch (e) {
@@ -169,6 +214,7 @@ class LibraryController extends ChangeNotifier {
         _emit();
         return;
       }
+      await _iosAccess(dir);
       folderPath = dir;
       await scanDirectory(dir);
     } catch (e) {

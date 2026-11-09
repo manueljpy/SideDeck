@@ -1,0 +1,77 @@
+# Codemagic iOS build → TestFlight
+#
+# Lives on the private WIP repo for now. Fine to commit to public SideDeck later:
+# this file has no secrets (certs / API key live in Codemagic team settings).
+#
+# Before the first build, in Codemagic:
+# 1. Connect Apple Developer Portal (API key). Name the integration: codemagic
+# 2. Generate/fetch an Apple Distribution certificate + App Store profile
+#    for bundle id es.manifold.sidedeck (Code signing identities)
+# 3. Set APP_STORE_APPLE_ID below from App Store Connect → App Information
+
+workflows:
+  ios-testflight:
+    name: iOS → TestFlight
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: es.manifold.sidedeck
+      vars:
+        BUNDLE_ID: es.manifold.sidedeck
+        # App Store Connect → App Information → Apple ID (numeric)
+        APP_STORE_APPLE_ID: "6827595789"
+    scripts:
+      - name: Install CMake (native audio engine)
+        script: |
+          brew install cmake
+          cmake --version
+      - name: Set up code signing settings on Xcode project
+        script: |
+          xcode-project use-profiles
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+      - name: Install pods
+        script: |
+          cd ios
+          pod install
+      - name: Flutter analyze
+        script: |
+          flutter analyze
+      - name: Flutter build ipa
+        script: |
+          set -euo pipefail
+          LATEST="$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || \
+            app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)"
+          BUILD_NUMBER=$((LATEST + 1))
+          echo "Using build number: $BUILD_NUMBER"
+          flutter build ipa --release \
+            --build-number="$BUILD_NUMBER" \
+            --export-options-plist=/Users/builder/export_options.plist
+      - name: Verify FFI symbols in Runner binary
+        script: |
+          set -euo pipefail
+          APP="$(find build/ios -name Runner.app -print -quit)"
+          BIN="$APP/Runner"
+          echo "Checking $BIN"
+          nm -gU "$BIN" | grep -E ' _dj_create$' || {
+            echo "error: _dj_create not exported in Runner — Dart FFI will fail" >&2
+            nm -gU "$BIN" | grep dj_ | head -50 >&2 || true
+            exit 1
+          }
+          echo "FFI OK: _dj_create present"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false

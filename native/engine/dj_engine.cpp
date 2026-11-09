@@ -5,8 +5,14 @@
 #include "id3_meta.hpp"
 #include "last_error.hpp"
 
+#include "log.hpp"
 #include "signalsmith-stretch.h"
+#ifdef __ANDROID__
 #include <oboe/Oboe.h>
+#endif
+#ifdef __APPLE__
+#include "ios_audio.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -33,10 +39,6 @@
 #include <opusfile.h>
 
 #include "chunk_cache.hpp"
-
-#include <android/log.h>
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "sidedeck", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sidedeck", __VA_ARGS__)
 
 namespace {
 
@@ -420,10 +422,18 @@ struct AtomicFlag {
   ~AtomicFlag() { flag.store(false); }
 };
 
+#ifdef __ANDROID__
 struct Engine : public oboe::AudioStreamDataCallback,
                 public oboe::AudioStreamErrorCallback {
+#else
+struct Engine {
+#endif
   std::mutex streamMutex;
+#ifdef __ANDROID__
   std::shared_ptr<oboe::AudioStream> stream;
+#elif defined(__APPLE__)
+  IosAudio* iosAudio = nullptr;
+#endif
   Deck decks[2];
   std::atomic<float> xfader{0.5f};
   std::atomic<float> master{1.0f};
@@ -436,6 +446,9 @@ struct Engine : public oboe::AudioStreamDataCallback,
   std::vector<float> mixAL, mixAR, mixBL, mixBR;
 
   Engine() {
+#ifdef __APPLE__
+    iosAudio = ios_audio_create();
+#endif
     mixAL.assign(kMaxCallbackFrames, 0.0f);
     mixAR.assign(kMaxCallbackFrames, 0.0f);
     mixBL.assign(kMaxCallbackFrames, 0.0f);
@@ -455,6 +468,10 @@ struct Engine : public oboe::AudioStreamDataCallback,
   ~Engine() {
     alive.store(false);
     closeStream();
+#ifdef __APPLE__
+    ios_audio_destroy(iosAudio);
+    iosAudio = nullptr;
+#endif
     decks[0].cache.stop();
     decks[1].cache.stop();
   }
@@ -506,6 +523,7 @@ struct Engine : public oboe::AudioStreamDataCallback,
     }
   }
 
+#ifdef __ANDROID__
   bool tryOpenStream(int wantCh, oboe::SharingMode share, oboe::PerformanceMode perf,
                      int32_t sampleRate, int32_t deviceId) {
     oboe::AudioStreamBuilder builder;
@@ -534,10 +552,12 @@ struct Engine : public oboe::AudioStreamDataCallback,
     }
     return true;
   }
+#endif
 
   bool openStream() {
     AtomicFlag busy(managingStream);
     std::lock_guard<std::mutex> lock(streamMutex);
+#ifdef __ANDROID__
     if (stream) {
       stream->stop();
       stream->close();
@@ -574,16 +594,54 @@ struct Engine : public oboe::AudioStreamDataCallback,
 
     const oboe::Result result = stream->requestStart();
     return result == oboe::Result::OK;
+#elif defined(__APPLE__)
+    if (iosAudio == nullptr) {
+      iosAudio = ios_audio_create();
+    }
+    ios_audio_stop(iosAudio);
+    const int mode = outputMode.load();
+    const int wantCh = mode == 1 ? 4 : 2;
+    const int wantSr = 48000;
+    engineSampleRate.store(wantSr);
+    engineChannels.store(wantCh);
+    applyLoadedDeckSampleRate(wantSr);
+    if (!ios_audio_start(
+            iosAudio, wantCh, wantSr,
+            [](void* ctx, float* out, int frames, int ch) {
+              static_cast<Engine*>(ctx)->renderInterleaved(out, frames, ch);
+            },
+            this)) {
+      LOGE("ios audio open failed (ch=%d)", wantCh);
+      return false;
+    }
+    const int newSr = ios_audio_sample_rate(iosAudio);
+    const int newCh = ios_audio_channels(iosAudio);
+    engineSampleRate.store(newSr);
+    engineChannels.store(newCh);
+    if (newSr != wantSr) {
+      applyLoadedDeckSampleRate(newSr);
+    }
+    LOGI("ios stream open sr=%d ch=%d", newSr, newCh);
+    return true;
+#else
+    return false;
+#endif
   }
 
   void closeStream() {
     AtomicFlag busy(managingStream);
     std::lock_guard<std::mutex> lock(streamMutex);
+#ifdef __ANDROID__
     if (stream) {
       stream->stop();
       stream->close();
       stream.reset();
     }
+#elif defined(__APPLE__)
+    if (iosAudio != nullptr) {
+      ios_audio_stop(iosAudio);
+    }
+#endif
   }
 
   void renderDeck(Deck& d, float* left, float* right, int frames) {
@@ -792,6 +850,7 @@ struct Engine : public oboe::AudioStreamDataCallback,
     }
   }
 
+#ifdef __ANDROID__
   oboe::DataCallbackResult onAudioReady(oboe::AudioStream* s, void* audioData,
                                         int32_t numFrames) override {
     if (s == nullptr || audioData == nullptr || s->getFormat() != oboe::AudioFormat::Float) {
@@ -818,6 +877,7 @@ struct Engine : public oboe::AudioStreamDataCallback,
       LOGE("stream reconnect failed");
     }
   }
+#endif
 
 
   // First 60s, mixed to mono and resampled for BPM/key.
