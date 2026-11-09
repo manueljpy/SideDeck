@@ -185,7 +185,9 @@ class SubsonicClient {
 
   /// Local path used for the download cache (whether or not the file exists).
   Future<String> cacheFilePath(SubsonicTrack track) async {
-    final dir = await getTemporaryDirectory();
+    final dir = Platform.isIOS
+        ? await getApplicationSupportDirectory()
+        : await getTemporaryDirectory();
     final cacheDir = Directory(p.join(dir.path, 'sidedeck_cache'));
     if (!await cacheDir.exists()) {
       await cacheDir.create(recursive: true);

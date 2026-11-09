@@ -18,11 +18,15 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  late final DjController _dj;
-  late final LibraryController _library;
+  DjController? _dj;
+  LibraryController? _library;
+  String? _bootError;
   int? _gridEditDeck;
   bool _mixerDialogOpen = false;
   BuildContext? _mixerDialogContext;
+
+  /// Only call from widgets built after a successful boot.
+  DjController get _djReady => _dj!;
 
   @override
   void initState() {
@@ -32,23 +36,46 @@ class _HomePageState extends State<HomePage> {
       DeviceOrientation.landscapeRight,
     ]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    _dj = DjController();
-    _library = LibraryController();
-    _dj.addListener(_onDjChanged);
+    try {
+      final dj = DjController();
+      final library = LibraryController();
+      dj.addListener(_onDjChanged);
+      _dj = dj;
+      _library = library;
+    } catch (e, st) {
+      _bootError = '$e\n$st';
+    }
   }
 
   @override
   void dispose() {
-    _dj.removeListener(_onDjChanged);
-    _dj.dispose();
-    _library.dispose();
+    final dj = _dj;
+    if (dj != null) {
+      dj.removeListener(_onDjChanged);
+      dj.dispose();
+    }
+    _library?.dispose();
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
   }
 
   void _onDjChanged() {
     if (!mounted) return;
-    final offer = _dj.mixerOffer;
+    final dj = _dj;
+    if (dj == null) return;
+    final err = dj.engineError;
+    // Only when this route is on top — Settings shows its own SnackBar.
+    if (err != null && (ModalRoute.of(context)?.isCurrent ?? false)) {
+      final msg = err;
+      dj.clearError();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg)),
+        );
+      });
+    }
+    final offer = dj.mixerOffer;
     if (offer == null) {
       if (_mixerDialogOpen) _dismissMixerDialog();
       return;
@@ -56,7 +83,7 @@ class _HomePageState extends State<HomePage> {
     if (_mixerDialogOpen) return;
     _mixerDialogOpen = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final next = _dj.mixerOffer;
+      final next = _dj?.mixerOffer;
       if (!mounted || next == null) {
         _mixerDialogOpen = false;
         return;
@@ -101,20 +128,27 @@ class _HomePageState extends State<HomePage> {
     _mixerDialogContext = null;
     _mixerDialogOpen = false;
     if (!mounted) return;
+    final dj = _dj;
+    if (dj == null) return;
     if (accepted == true) {
-      await _dj.acceptMixerOffer();
-    } else if (_dj.mixerOffer != null) {
-      _dj.declineMixerOffer();
+      await dj.acceptMixerOffer();
+    } else if (dj.mixerOffer != null) {
+      dj.declineMixerOffer();
     }
   }
 
   Future<void> _openSettings() async {
+    final dj = _dj;
+    if (dj == null) return;
     await Navigator.of(
       context,
-    ).push(MaterialPageRoute(builder: (_) => SettingsPage(dj: _dj)));
+    ).push(MaterialPageRoute(builder: (_) => SettingsPage(dj: dj)));
   }
 
   Future<void> _openLibrary() async {
+    final dj = _dj;
+    final library = _library;
+    if (dj == null || library == null) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -128,8 +162,8 @@ class _HomePageState extends State<HomePage> {
             removeLeft: true,
             removeRight: true,
             child: LibraryOverlay(
-              dj: _dj,
-              library: _library,
+              dj: dj,
+              library: library,
               onOpenSettings: () async {
                 Navigator.pop(context);
                 await _openSettings();
@@ -143,22 +177,47 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final bootError = _bootError;
+    if (bootError != null) {
+      return Scaffold(
+        backgroundColor: SideDeckTheme.bg,
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: SelectableText(
+              'SideDeck failed to start\n\n$bootError',
+              style: const TextStyle(
+                color: SideDeckTheme.text,
+                fontSize: 13,
+                fontFamily: 'Courier',
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final dj = _djReady;
+    final library = _library!;
     return AnimatedBuilder(
-      animation: Listenable.merge([_dj, _library]),
+      animation: Listenable.merge([dj, library]),
       builder: (context, _) {
         return Scaffold(
-          backgroundColor: Colors.black,
+          // Match mixer so L/R (and home-indicator) safe-area gutters aren't black.
+          backgroundColor: SideDeckTheme.panel,
           body: SafeArea(
-            child: Column(
-              children: [
-                if (_dj.engineError != null) _errorBar(),
-                Expanded(flex: 5, child: _waveDeck(0, SideDeckTheme.accentA)),
-                Expanded(flex: 5, child: _waveDeck(1, SideDeckTheme.accentB)),
-                if (_dj.externalMixer)
-                  _mixerBar()
-                else
-                  Expanded(flex: 7, child: _mixerBar(expand: true)),
-              ],
+            child: ColoredBox(
+              color: Colors.black,
+              child: Column(
+                children: [
+                  Expanded(flex: 5, child: _waveDeck(0, SideDeckTheme.accentA)),
+                  Expanded(flex: 5, child: _waveDeck(1, SideDeckTheme.accentB)),
+                  if (dj.externalMixer)
+                    _mixerBar()
+                  else
+                    Expanded(flex: 7, child: _mixerBar(expand: true)),
+                ],
+              ),
             ),
           ),
         );
@@ -171,7 +230,7 @@ class _HomePageState extends State<HomePage> {
       fit: expand ? StackFit.expand : StackFit.loose,
       children: [
         MixerStrip(
-          controller: _dj,
+          controller: _djReady,
           onLibrary: _openLibrary,
           onSettings: _openSettings,
         ),
@@ -186,37 +245,8 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _errorBar() {
-    return Material(
-      color: const Color(0xFF5C1A1A),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Row(
-          children: [
-            const Icon(Icons.error_outline, size: 16, color: Color(0xFFFF8A80)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _dj.engineError!,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: Color(0xFFFFCDD2)),
-              ),
-            ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Dismiss',
-              onPressed: _dj.clearError,
-              icon: const Icon(Icons.close, size: 16),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _waveDeck(int i, Color accent) {
-    final d = _dj.deck(i);
+    final d = _djReady.deck(i);
     final remaining = (d.duration - d.position).clamp(0.0, 99999.0);
     final info = d.loaded
         ? '${d.title}   ${_bpmLabel(d)}   ${formatKey(d.key)}   −${formatDuration(remaining)}'
@@ -233,9 +263,16 @@ class _HomePageState extends State<HomePage> {
             final play = d.loaded
                 ? (constraints.maxHeight - overview - 6).clamp(40.0, 120.0)
                 : 0.0;
-            final playFoot = pad + play;
-            final nudgeFoot = pad + _wavePadSize * 2 + _wavePadGap;
             final w = constraints.maxWidth;
+            // Shrink pads so BPM cluster + nudges fit the side strip (no min floor
+            // that would reintroduce overlap on very narrow widths).
+            final side = w * (0.5 - WaveformPainter.jumpHalf);
+            final padSize = ((side - pad - 3 * _wavePadGap) / 5).clamp(
+              1.0,
+              _wavePadSize,
+            );
+            final playFoot = pad + play;
+            final nudgeFoot = pad + padSize * 2 + _wavePadGap;
             final loopGap = WaveformPainter.jumpZoneLeft(w) - playFoot;
             final bpmGap = w - WaveformPainter.jumpZoneRight(w) - nudgeFoot;
             return Stack(
@@ -253,8 +290,8 @@ class _HomePageState extends State<HomePage> {
                   loopEnabled: d.loopEnabled,
                   loopStart: d.loopStart,
                   loopEnd: d.loopEnd,
-                  onSeek: d.loaded ? (t) => _dj.seek(i, t) : null,
-                  onOverviewSeek: d.loaded ? (t) => _dj.seekTo(i, t) : null,
+                  onSeek: d.loaded ? (t) => _djReady.seek(i, t) : null,
+                  onOverviewSeek: d.loaded ? (t) => _djReady.seekTo(i, t) : null,
                 ),
                 if (!d.loaded)
                   Positioned.fill(
@@ -298,9 +335,19 @@ class _HomePageState extends State<HomePage> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _holdNudge(i, faster: false, accent: accent),
-                        const SizedBox(width: _wavePadGap),
-                        _holdNudge(i, faster: true, accent: accent),
+                        _holdNudge(
+                          i,
+                          faster: false,
+                          accent: accent,
+                          size: padSize,
+                        ),
+                        SizedBox(width: _wavePadGap),
+                        _holdNudge(
+                          i,
+                          faster: true,
+                          accent: accent,
+                          size: padSize,
+                        ),
                       ],
                     ),
                   ),
@@ -329,14 +376,18 @@ class _HomePageState extends State<HomePage> {
                     left: playFoot,
                     width: loopGap,
                     bottom: pad,
-                    child: Center(child: _waveLoop(i, accent)),
+                    child: Center(
+                      child: _waveLoop(i, accent, size: padSize),
+                    ),
                   ),
                 if (d.loaded && _gridEditDeck != i && bpmGap > 0)
                   Positioned(
                     left: WaveformPainter.jumpZoneRight(w),
                     width: bpmGap,
                     bottom: pad,
-                    child: Center(child: _waveBpm(i, accent)),
+                    child: Center(
+                      child: _waveBpm(i, accent, size: padSize),
+                    ),
                   ),
               ],
             );
@@ -361,7 +412,7 @@ class _HomePageState extends State<HomePage> {
       elevation: 0,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () => _dj.playPause(i),
+        onTap: () => _djReady.playPause(i),
         child: SizedBox(
           width: size,
           height: size,
@@ -456,14 +507,14 @@ class _HomePageState extends State<HomePage> {
           children: [
             pair(
               'beat',
-              step('«', () => _dj.shiftGridBeats(deck, -1)),
-              step('»', () => _dj.shiftGridBeats(deck, 1)),
+              step('«', () => _djReady.shiftGridBeats(deck, -1)),
+              step('»', () => _djReady.shiftGridBeats(deck, 1)),
             ),
             const SizedBox(width: 16),
             pair(
               '5 ms',
-              step('‹', () => _dj.shiftGridMs(deck, -5)),
-              step('›', () => _dj.shiftGridMs(deck, 5)),
+              step('‹', () => _djReady.shiftGridMs(deck, -5)),
+              step('›', () => _djReady.shiftGridMs(deck, 5)),
             ),
           ],
         ),
@@ -475,48 +526,59 @@ class _HomePageState extends State<HomePage> {
   static const _wavePadSize = 56.0;
   static const _wavePadGap = 6.0;
 
-  Widget _waveLoop(int deck, Color accent) {
-    final d = _dj.deck(deck);
+  Widget _waveLoop(int deck, Color accent, {required double size}) {
+    final d = _djReady.deck(deck);
     final beats = d.loopBars * 4;
     final beatsLabel = (beats - beats.round()).abs() < 0.05
         ? '${beats.round()}'
         : beats.toStringAsFixed(1);
     final canHalf = beats > DjController.loopBeats.first + 0.05;
     final canDouble = beats < DjController.loopBeats.last - 0.05;
+    final labelStyle = _wavePadLabelStyle(size);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         HoldRepeatButton(
           enabled: canHalf,
-          onStep: () => _dj.halfLoop(deck),
-          child: _wavePad(accent, child: const Text('½', style: _wavePadText)),
+          onStep: () => _djReady.halfLoop(deck),
+          child: _wavePad(
+            accent,
+            size: size,
+            child: Text('½', style: labelStyle),
+          ),
         ),
-        const SizedBox(width: _wavePadGap),
+        SizedBox(width: _wavePadGap),
         GestureDetector(
-          onTap: () => _dj.setLoop(
+          onTap: () => _djReady.setLoop(
             deck,
             !d.loopEnabled,
             d.loopBars == 0 ? 1 : d.loopBars,
           ),
           child: _wavePad(
             accent,
+            size: size,
             filled: d.loopEnabled,
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  beatsLabel,
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    height: 1,
-                    color: d.loopEnabled ? Colors.black : Colors.white,
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    beatsLabel,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: TextStyle(
+                      fontSize: size * 0.32,
+                      fontWeight: FontWeight.w800,
+                      height: 1,
+                      color: d.loopEnabled ? Colors.black : Colors.white,
+                    ),
                   ),
                 ),
                 Text(
                   'LOOP',
                   style: TextStyle(
-                    fontSize: 9,
+                    fontSize: size * 0.16,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 0.6,
                     color: d.loopEnabled ? Colors.black : accent,
@@ -526,53 +588,68 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ),
-        const SizedBox(width: _wavePadGap),
+        SizedBox(width: _wavePadGap),
         HoldRepeatButton(
           enabled: canDouble,
-          onStep: () => _dj.doubleLoop(deck),
-          child: _wavePad(accent, child: const Text('×2', style: _wavePadText)),
+          onStep: () => _djReady.doubleLoop(deck),
+          child: _wavePad(
+            accent,
+            size: size,
+            child: Text('×2', style: labelStyle),
+          ),
         ),
       ],
     );
   }
 
-  Widget _waveBpm(int deck, Color accent) {
-    final d = _dj.deck(deck);
+  Widget _waveBpm(int deck, Color accent, {required double size}) {
+    final d = _djReady.deck(deck);
     final heard = d.bpm * d.rate;
     final bpmLabel = d.bpm > 1 ? heard.toStringAsFixed(1) : '—';
+    final labelStyle = _wavePadLabelStyle(size);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         HoldRepeatButton(
           enabled: d.loaded && d.bpm > 1,
-          onStep: () => _dj.nudgeBpm(deck, -0.1),
-          child: _wavePad(accent, child: const Text('−', style: _wavePadText)),
+          onStep: () => _djReady.nudgeBpm(deck, -0.1),
+          child: _wavePad(
+            accent,
+            size: size,
+            child: Text('−', style: labelStyle),
+          ),
         ),
-        const SizedBox(width: _wavePadGap),
+        SizedBox(width: _wavePadGap),
         GestureDetector(
-          onTap: d.loaded && _dj.deck(1 - deck).loaded
-              ? () => _dj.sync(deck)
+          onTap: d.loaded && _djReady.deck(1 - deck).loaded
+              ? () => _djReady.sync(deck)
               : null,
           child: _wavePad(
             accent,
+            size: size,
             filled: d.synced,
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  bpmLabel,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    height: 1,
-                    color: d.synced ? Colors.black : Colors.white,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    bpmLabel,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: TextStyle(
+                      fontSize: size * 0.26,
+                      fontWeight: FontWeight.w800,
+                      height: 1,
+                      color: d.synced ? Colors.black : Colors.white,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
                   ),
                 ),
                 Text(
                   'SYNC',
                   style: TextStyle(
-                    fontSize: 9,
+                    fontSize: size * 0.16,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 0.6,
                     color: d.synced ? Colors.black : accent,
@@ -582,26 +659,35 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ),
-        const SizedBox(width: _wavePadGap),
+        SizedBox(width: _wavePadGap),
         HoldRepeatButton(
           enabled: d.loaded && d.bpm > 1,
-          onStep: () => _dj.nudgeBpm(deck, 0.1),
-          child: _wavePad(accent, child: const Text('+', style: _wavePadText)),
+          onStep: () => _djReady.nudgeBpm(deck, 0.1),
+          child: _wavePad(
+            accent,
+            size: size,
+            child: Text('+', style: labelStyle),
+          ),
         ),
       ],
     );
   }
 
-  static const _wavePadText = TextStyle(
-    fontSize: 18,
+  static TextStyle _wavePadLabelStyle(double size) => TextStyle(
+    fontSize: size * 0.32,
     fontWeight: FontWeight.w800,
     color: Colors.white,
   );
 
-  Widget _wavePad(Color accent, {required Widget child, bool filled = false}) {
+  Widget _wavePad(
+    Color accent, {
+    required Widget child,
+    required double size,
+    bool filled = false,
+  }) {
     return SizedBox(
-      width: _wavePadSize,
-      height: _wavePadSize,
+      width: size,
+      height: size,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: filled
@@ -615,27 +701,33 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _holdNudge(int deck, {required bool faster, required Color accent}) {
-    final on = _dj.deck(deck).loaded;
+  Widget _holdNudge(
+    int deck, {
+    required bool faster,
+    required Color accent,
+    required double size,
+  }) {
+    final on = _djReady.deck(deck).loaded;
     final color = on ? Colors.white : SideDeckTheme.muted;
     return Listener(
-      onPointerDown: on ? (_) => _dj.startNudge(deck, faster: faster) : null,
-      onPointerUp: on ? (_) => _dj.endNudge(deck) : null,
-      onPointerCancel: on ? (_) => _dj.endNudge(deck) : null,
+      onPointerDown: on ? (_) => _djReady.startNudge(deck, faster: faster) : null,
+      onPointerUp: on ? (_) => _djReady.endNudge(deck) : null,
+      onPointerCancel: on ? (_) => _djReady.endNudge(deck) : null,
       child: _wavePad(
         accent,
+        size: size,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
               faster ? Icons.arrow_forward : Icons.arrow_back,
-              size: 22,
+              size: size * 0.39,
               color: color,
             ),
             Text(
               'NUDGE',
               style: TextStyle(
-                fontSize: 9,
+                fontSize: size * 0.16,
                 fontWeight: FontWeight.w800,
                 letterSpacing: 0.6,
                 color: on ? accent : SideDeckTheme.muted,

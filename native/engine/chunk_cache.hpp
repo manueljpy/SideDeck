@@ -8,9 +8,9 @@
 // chunk boundary is never a resampling boundary and there is nothing to splice.
 
 #include "streaming_decoder.hpp"
+#include "log.hpp"
 
 #include <algorithm>
-#include <android/log.h>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -24,8 +24,9 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-
-#define CACHE_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "sidedeck.cache", __VA_ARGS__)
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 
 struct ChunkCache {
   static constexpr int kChunkFrames = 8192;
@@ -438,7 +439,11 @@ struct ChunkCache {
   void workerMain() {
     // Best effort: if the platform refuses the priority bump, decoding still
     // works, it just has less headroom against a busy UI thread.
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#else
     setpriority(PRIO_PROCESS, (id_t)gettid(), kWorkerNice);
+#endif
     StreamingDecoder dec;
     std::string path;
     {
