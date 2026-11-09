@@ -37,6 +37,7 @@
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
 #include <opusfile.h>
+#include <vorbis/vorbisfile.h>
 
 #include "chunk_cache.hpp"
 

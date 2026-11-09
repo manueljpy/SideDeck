@@ -46,7 +46,7 @@ target_include_directories(dj_engine PRIVATE
   "${QM_DSP_DIR}"
 )
 
-target_link_libraries(dj_engine PRIVATE qm_dsp opusfile)
+target_link_libraries(dj_engine PRIVATE qm_dsp opusfile vorbisfile)
 
 if(APPLE)
   target_link_libraries(dj_engine PRIVATE
@@ -62,8 +62,10 @@ if(APPLE)
       $<TARGET_FILE:qm_dsp>
       $<TARGET_FILE:opusfile>
       $<TARGET_FILE:opus>
+      $<TARGET_FILE:vorbisfile>
+      $<TARGET_FILE:vorbis>
       $<TARGET_FILE:ogg>
-    DEPENDS dj_engine qm_dsp opusfile opus ogg
+    DEPENDS dj_engine qm_dsp opusfile opus vorbisfile vorbis ogg
     VERBATIM
   )
   add_custom_target(dj_engine_bundle ALL DEPENDS "${CMAKE_BINARY_DIR}/libdj_engine_bundle.a")

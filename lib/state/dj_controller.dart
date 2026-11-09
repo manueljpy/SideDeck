@@ -174,7 +174,7 @@ class DjController extends ChangeNotifier {
       final detail = _engine.lastError();
       engineError = detail.isNotEmpty
           ? 'Could not load $name - $detail'
-          : 'Could not decode $name (need MP3, WAV, FLAC, Opus, or AAC M4A).';
+          : 'Could not decode $name (need MP3, WAV, FLAC, Opus, Ogg Vorbis, or AAC M4A).';
       notifyListeners();
       return false;
     }

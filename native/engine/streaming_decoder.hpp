@@ -1,7 +1,7 @@
 #pragma once
 
-// Streaming decoder for local files. Include after dr_mp3 / dr_wav / dr_flac
-// and (for Opus) opusfile.h. Keep the decoder open, seek, read chunks.
+// Streaming decoder for local files. Include after dr_mp3 / dr_wav / dr_flac,
+// opusfile.h, and vorbis/vorbisfile.h. Keep the decoder open, seek, read chunks.
 // On Android, AAC/ALAC-in-M4A uses MediaCodec (see mediacodec_aac.hpp).
 
 #include <algorithm>
@@ -20,13 +20,14 @@
 #endif
 
 struct StreamingDecoder {
-  enum class Kind { None, Wav, Mp3, Flac, Opus, M4a };
+  enum class Kind { None, Wav, Mp3, Flac, Opus, Vorbis, M4a };
 
   Kind kind = Kind::None;
   drwav wav{};
   drmp3 mp3{};
   drflac* flac = nullptr;
   OggOpusFile* opus = nullptr;
+  std::unique_ptr<OggVorbis_File> vorbis;
 #ifdef __ANDROID__
   std::unique_ptr<MediaCodecAacDecoder> aac;
 #endif
@@ -50,6 +51,8 @@ struct StreamingDecoder {
       drflac_close(flac);
     } else if (kind == Kind::Opus && opus) {
       op_free(opus);
+    } else if (kind == Kind::Vorbis && vorbis) {
+      ov_clear(vorbis.get());
     }
 #ifdef __ANDROID__
     else if (kind == Kind::M4a && aac) {
@@ -59,6 +62,7 @@ struct StreamingDecoder {
 #endif
     flac = nullptr;
     opus = nullptr;
+    vorbis.reset();
     kind = Kind::None;
     channels = 0;
     sampleRate = 0;
@@ -97,8 +101,21 @@ struct StreamingDecoder {
     // Definite containers: try only the matching decoder. Falling through to
     // MP3 on an Ogg Vorbis file makes dr_mp3 scan for frame sync forever
     // (analyze-all looks hung on the first .ogg).
-    if (isOgg(head, nHead) || extIs(path, ".opus") || extIs(path, ".ogg")) {
-      return tryOpus(path);
+    if (isOgg(head, nHead) || extIs(path, ".opus") || extIs(path, ".ogg") ||
+        extIs(path, ".oga")) {
+      // .opus is Opus-in-Ogg; .ogg / .oga may be Opus or Vorbis.
+      if (extIs(path, ".opus")) {
+        if (tryOpus(path)) {
+          return true;
+        }
+        djSetLastError("Couldn't open this Opus file.");
+        return false;
+      }
+      if (tryOpus(path) || tryVorbis(path)) {
+        return true;
+      }
+      djSetLastError("Couldn't open this Ogg file (need Opus or Vorbis).");
+      return false;
     }
 #ifdef __ANDROID__
     // ISO BMFF (ftyp) or explicit M4A/AAC extensions — MediaCodec (AAC or ALAC).
@@ -153,6 +170,10 @@ struct StreamingDecoder {
       const ogg_int64_t pos = op_pcm_tell(opus);
       return pos < 0 ? 0 : (uint64_t)pos;
     }
+    if (kind == Kind::Vorbis && vorbis) {
+      const ogg_int64_t pos = ov_pcm_tell(vorbis.get());
+      return pos < 0 ? 0 : (uint64_t)pos;
+    }
 #ifdef __ANDROID__
     if (kind == Kind::M4a && aac) {
       return aac->tell();
@@ -176,6 +197,9 @@ struct StreamingDecoder {
     }
     if (kind == Kind::Opus && opus) {
       return op_pcm_seek(opus, (ogg_int64_t)frame) == 0;
+    }
+    if (kind == Kind::Vorbis && vorbis) {
+      return ov_pcm_seek(vorbis.get(), (ogg_int64_t)frame) == 0;
     }
 #ifdef __ANDROID__
     if (kind == Kind::M4a && aac) {
@@ -224,6 +248,22 @@ struct StreamingDecoder {
       }
       for (int i = 0; i < n; ++i) {
         out[i * 2] = out[i * 2 + 1] = tmp[(size_t)i];
+      }
+      return (uint64_t)n;
+    }
+    if (kind == Kind::Vorbis && vorbis) {
+      float** pcm = nullptr;
+      const long n = ov_read_float(vorbis.get(), &pcm, (int)frames, nullptr);
+      if (n <= 0 || !pcm) {
+        return 0;
+      }
+      for (long i = 0; i < n; ++i) {
+        if (channels == 1) {
+          out[i * 2] = out[i * 2 + 1] = pcm[0][i];
+        } else {
+          out[i * 2] = pcm[0][i];
+          out[i * 2 + 1] = pcm[1][i];
+        }
       }
       return (uint64_t)n;
     }
@@ -279,6 +319,8 @@ struct StreamingDecoder {
         return tryFlac(path);
       case Kind::Opus:
         return tryOpus(path);
+      case Kind::Vorbis:
+        return tryVorbis(path);
       case Kind::Mp3:
         return tryMp3(path);
 #ifdef __ANDROID__
@@ -358,6 +400,27 @@ struct StreamingDecoder {
     kind = Kind::Opus;
     // Decoded Opus is always 48 kHz.
     return acceptOpen((unsigned)ch, 48000, (uint64_t)total);
+  }
+
+  bool tryVorbis(const char* path) {
+    auto vf = std::make_unique<OggVorbis_File>();
+    std::memset(vf.get(), 0, sizeof(OggVorbis_File));
+    if (ov_fopen(path, vf.get()) != 0) {
+      return false;
+    }
+    if (!ov_seekable(vf.get())) {
+      ov_clear(vf.get());
+      return false;
+    }
+    vorbis_info* vi = ov_info(vf.get(), -1);
+    const ogg_int64_t total = ov_pcm_total(vf.get(), -1);
+    if (!vi || vi->channels < 1 || vi->rate < 1 || total <= 0) {
+      ov_clear(vf.get());
+      return false;
+    }
+    kind = Kind::Vorbis;
+    vorbis = std::move(vf);
+    return acceptOpen((unsigned)vi->channels, (unsigned)vi->rate, (uint64_t)total);
   }
 
   bool tryMp3(const char* path) {

@@ -21,7 +21,7 @@
 ## libogg — BSD-style
 - Path: `third_party/ogg`
 - Upstream: https://github.com/xiph/ogg (v1.3.5)
-- Used for: Ogg container demux (Opus)
+- Used for: Ogg container demux (Opus, Vorbis)
 - Vendored subset: sources + CMake + COPYING (no CI/docs/examples).
   `ogg.pc.in` kept because upstream CMake still configures it.
 
@@ -36,9 +36,16 @@
 ## opusfile — BSD-style
 - Path: `third_party/opusfile`
 - Upstream: https://github.com/xiph/opusfile (v0.12)
-- Used for: seekable Opus-in-Ogg decode (`.opus` / `.ogg`)
+- Used for: seekable Opus-in-Ogg decode (`.opus` / Opus `.ogg`)
 - Built without HTTP/OpenSSL (`http.c` not compiled)
 - Vendored subset: decode sources + COPYING (no examples/CI)
+
+## libvorbis / vorbisfile — BSD-style
+- Path: `third_party/vorbis`
+- Upstream: https://github.com/xiph/vorbis (v1.3.7)
+- Used for: seekable Ogg Vorbis decode (`.ogg`)
+- Decode-only subset: lib sources + `vorbisfile` + public headers + COPYING
+  (no vorbisenc, books/, modes/, docs, examples, or upstream CMake)
 
 ## qm-dsp (beat + key subset) — GPL-2.0-or-later
 - Path: `third_party/qm-dsp`

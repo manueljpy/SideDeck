@@ -42,6 +42,7 @@ target_link_libraries(dj_engine
   qm_dsp
   oboe
   opusfile
+  vorbisfile
   android
   mediandk
   ${log-lib}

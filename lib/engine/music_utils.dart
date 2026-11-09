@@ -1,5 +1,15 @@
 /// Extensions the native engine can open (lowercase, no dot).
-const nativeAudioExtensions = ['mp3', 'wav', 'flac', 'opus', 'ogg', 'm4a', 'aac', 'm4b'];
+const nativeAudioExtensions = [
+  'mp3',
+  'wav',
+  'flac',
+  'opus',
+  'ogg',
+  'oga',
+  'm4a',
+  'aac',
+  'm4b',
+];
 
 bool isNativeAudioExtension(String ext) {
   var e = ext.toLowerCase();

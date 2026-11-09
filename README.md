@@ -60,7 +60,7 @@ engine is compiled by CMake during the Xcode build.
 ## What works today
 
 - Dual-deck landscape UI (waveforms, no platters)
-- Native engine (Oboe on Android, Core Audio on iOS), MP3 / WAV / FLAC / Opus / AAC (M4A); ALAC when the device has a decoder
+- Native engine (Oboe on Android, Core Audio on iOS), MP3 / WAV / FLAC / Opus / Ogg Vorbis / AAC (M4A); ALAC when the device has a decoder
 - Internal mixer: 3-band EQ, filter, crossfader
 - BPM / key analysis on load (cached in SQLite); Camelot labels
 - Beat detector: Queen Mary TempoTrackV2 + Mixxx BeatUtils; key: Queen Mary GetKeyMode
@@ -104,7 +104,7 @@ lib/                 Dart UI, controllers, Subsonic client, FFI
 native/engine/       C++ engine, EQ, analysis, iOS Core Audio
 android/app/         Android host, USB AudioTrack output
 ios/                 iPhone host, CMake engine build
-third_party/         Oboe, Signalsmith, qm-dsp, dr_libs, ogg/opus/opusfile
+third_party/         Oboe, Signalsmith, qm-dsp, dr_libs, ogg/opus/opusfile/vorbis
 test/                Dart tests
 ```
 

@@ -21,7 +21,7 @@ dr_libs — dr_mp3 / dr_wav / dr_flac (public domain / MIT-0)
 libogg (BSD-style)
   third_party/ogg
   https://github.com/xiph/ogg
-  Ogg container demux for Opus
+  Ogg container demux for Opus and Vorbis
 
 libopus (BSD-style)
   third_party/opus
@@ -32,6 +32,11 @@ opusfile (BSD-style)
   third_party/opusfile
   https://github.com/xiph/opusfile
   Seekable Opus-in-Ogg decode
+
+libvorbis / vorbisfile (BSD-style)
+  third_party/vorbis
+  https://github.com/xiph/vorbis
+  Ogg Vorbis decode (vorbisenc omitted)
 
 Signalsmith Stretch (MIT)
   third_party/signalsmith-stretch
