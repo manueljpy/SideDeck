@@ -4,11 +4,21 @@
 <h2 align="center"><b>SideDeck</b></h2>
 <h4 align="center">Free DJ app for Android and iPhone. Mix on your phone, or on hardware.</h4>
 
-<p align="center">
-  <a href="https://f-droid.org/packages/es.manifold.sidedeck"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" alt="Get it on F-Droid" width="220"></a>
-  <a href="https://play.google.com/store/apps/details?id=es.manifold.sidedeck"><img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" width="220"></a>
-  <a href="https://apps.apple.com/app/id6827595789"><img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" alt="Download on the App Store" width="180"></a>
-</p>
+<div align="center">
+  <table align="center">
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://f-droid.org/packages/es.manifold.sidedeck"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" alt="Get it on F-Droid" width="220"></a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://play.google.com/store/apps/details?id=es.manifold.sidedeck"><img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" width="220"></a>
+      </td>
+      <td align="center" valign="middle">
+        <a href="https://apps.apple.com/app/id6827595789"><img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" alt="Download on the App Store" width="180"></a>
+      </td>
+    </tr>
+  </table>
+</div>
 
 Android and iPhone DJ deck for local files and a Subsonic music server.
 Landscape dual decks, waveforms, and an internal mixer, or four-channel USB
