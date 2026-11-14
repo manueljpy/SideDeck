@@ -35,6 +35,9 @@ object UsbPlayer {
 
     private const val FRAMES = 256
     private const val SAMPLE_RATE = 48000
+    private const val VERIFY_TIMEOUT_NS = 500_000_000L
+    private const val MAX_STALLS = 200
+    private const val STALL_SLEEP_MS = 5L
 
     @Volatile
     private var running = false
@@ -68,8 +71,8 @@ object UsbPlayer {
         if (t == null) t = openViaDirectTrack(device, channels, notes)
         if (t == null) return failure("Android refused a multi-channel USB track", notes)
 
+        // Already playing: candidates are only accepted once startAndVerify() saw them consume audio.
         track = t
-        t.play()
         val actual = t.channelCount
         val routed = t.routedDevice
         val encoding = t.audioFormat
@@ -183,14 +186,32 @@ object UsbPlayer {
         preferredDevice = device
         preferredAttributes = attrs
 
-        val t = build(attrs, pick.format, device)
-        if (t == null) {
-            notes.add("track build failed for ${describe(pick.format)}")
-            clearPreferred()
-            return null
-        }
         notes.add("forced USB mixer to ${describe(pick.format)}")
-        return t
+
+        // A track in exactly the mixer format can be matched to a DIRECT output profile
+        // instead of the reconfigured mixer. On Samsung/QTI that direct_pcm output dies on
+        // start (status -32), so ask for float + channel index mask first: that only fits
+        // the mixer thread, which converts to the USB format itself.
+        val ch = pick.format.channelCount
+        val candidates = listOf(
+            AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                .setSampleRate(if (pick.format.sampleRate > 0) pick.format.sampleRate else SAMPLE_RATE)
+                .setChannelIndexMask((1 shl ch) - 1)
+                .build(),
+            pick.format,
+        )
+        for (format in candidates) {
+            val t = build(attrs, format, device) ?: continue
+            if (t.channelCount >= 4 && startAndVerify(t)) {
+                notes.add("mixer track: ${describe(format)}")
+                return t
+            }
+            notes.add("mixer track did not start: ${describe(format)}")
+            t.release()
+        }
+        clearPreferred()
+        return null
     }
 
     /**
@@ -254,8 +275,11 @@ object UsbPlayer {
         for (format in candidates) {
             val t = build(attrs, format, device)
             if (t != null && t.channelCount >= 4) {
-                notes.add("direct track: ${describe(format)}")
-                return t
+                if (startAndVerify(t)) {
+                    notes.add("direct track: ${describe(format)}")
+                    return t
+                }
+                notes.add("direct track did not start: ${describe(format)}")
             }
             t?.release()
         }
@@ -293,6 +317,30 @@ object UsbPlayer {
         }
     }
 
+    /**
+     * AudioTrack.play() swallows native start failures (logcat shows "start(): status -32"
+     * while playState still says PLAYING), so only trust a track whose head actually moves.
+     */
+    private fun startAndVerify(t: AudioTrack): Boolean {
+        val bytesPerFrame = t.channelCount * bytesPerSample(t.audioFormat)
+        val silence = ByteBuffer.allocateDirect(bytesPerFrame * FRAMES).order(ByteOrder.nativeOrder())
+        return try {
+            t.play()
+            val deadline = System.nanoTime() + VERIFY_TIMEOUT_NS
+            while (System.nanoTime() < deadline) {
+                silence.position(0)
+                if (t.write(silence, silence.capacity(), AudioTrack.WRITE_NON_BLOCKING) < 0) return false
+                if (t.playbackHeadPosition > 0) return true
+                Thread.sleep(10)
+            }
+            Log.w("sidedeck", "usb track never advanced after play()")
+            false
+        } catch (e: Exception) {
+            Log.w("sidedeck", "usb track start: $e")
+            false
+        }
+    }
+
     private fun loop(handle: Long, channels: Int, encoding: Int) {
         val t = track ?: return
         val samples = FRAMES * channels
@@ -301,32 +349,48 @@ object UsbPlayer {
         val floats = buffer.asFloatBuffer()
         val ints = buffer.asIntBuffer()
         val shorts = if (encoding == AudioFormat.ENCODING_PCM_16BIT) ShortArray(samples) else null
+        var stalls = 0
         while (running) {
             usbRender(handle, buffer, FRAMES, channels)
-            val written = when (encoding) {
-                AudioFormat.ENCODING_PCM_FLOAT -> {
-                    buffer.position(0)
-                    t.write(buffer, samples * 4, AudioTrack.WRITE_BLOCKING)
-                }
+            when (encoding) {
                 AudioFormat.ENCODING_PCM_32BIT -> {
                     for (i in 0 until samples) {
                         val v = floats.get(i).coerceIn(-1f, 1f).toDouble()
                         ints.put(i, (v * 2147483647.0).toInt())
                     }
-                    buffer.position(0)
-                    t.write(buffer, samples * 4, AudioTrack.WRITE_BLOCKING)
                 }
-                else -> {
+                AudioFormat.ENCODING_PCM_16BIT -> {
                     val s = shorts!!
                     for (i in 0 until samples) {
                         s[i] = (floats.get(i) * 32767f).toInt().coerceIn(-32767, 32767).toShort()
                     }
-                    t.write(s, 0, samples, AudioTrack.WRITE_BLOCKING)
                 }
             }
-            if (written < 0) {
-                Log.e("sidedeck", "usb write error $written")
-                break
+            // Never render the next block until this one is consumed: a write that returns 0
+            // (dead or unstarted track) must not let the decks run ahead at CPU speed.
+            var done = 0
+            while (running && done < samples) {
+                val written = if (shorts != null) {
+                    t.write(shorts, done, samples - done, AudioTrack.WRITE_BLOCKING)
+                } else {
+                    buffer.position(done * 4)
+                    val bytes = t.write(buffer, (samples - done) * 4, AudioTrack.WRITE_BLOCKING)
+                    if (bytes < 0) bytes else bytes / 4
+                }
+                if (written < 0) {
+                    Log.e("sidedeck", "usb write error $written")
+                    return
+                }
+                if (written == 0) {
+                    if (++stalls >= MAX_STALLS) {
+                        Log.e("sidedeck", "usb track stopped consuming audio; giving up")
+                        return
+                    }
+                    Thread.sleep(STALL_SLEEP_MS)
+                } else {
+                    stalls = 0
+                    done += written
+                }
             }
         }
     }
