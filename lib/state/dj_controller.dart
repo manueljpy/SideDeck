@@ -74,9 +74,22 @@ class DjController extends ChangeNotifier {
   void _onUsbEvent(UsbHotplugEvent event) {
     if (event.attached) {
       _onUsbAttached(event);
-    } else {
+    } else if (event.playbackStopped) {
+      _onUsbPlaybackStopped(event);
+    } else if (event.detached) {
       _onUsbDetached(event);
     }
+  }
+
+  void _onUsbPlaybackStopped(UsbHotplugEvent event) {
+    if (!externalMixer) return;
+    final name = UsbOutput.deviceLabel(
+      usbDeviceName.isEmpty ? event.name : usbDeviceName,
+    );
+    setExternalMixer(false).then((_) {
+      engineError = 'USB audio to $name stopped; audio is back on the phone.';
+      notifyListeners();
+    });
   }
 
   void _onUsbAttached(UsbHotplugEvent event) {

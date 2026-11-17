@@ -28,16 +28,21 @@ class UsbStartResult {
 
 class UsbHotplugEvent {
   const UsbHotplugEvent({
-    required this.attached,
+    required this.kind,
     required this.id,
     required this.channels,
     required this.name,
   });
 
-  final bool attached;
+  /// Native payload: `attached`, `detached`, or `playback_stopped`.
+  final String kind;
   final int id;
   final int channels;
   final String name;
+
+  bool get attached => kind == 'attached';
+  bool get detached => kind == 'detached';
+  bool get playbackStopped => kind == 'playback_stopped';
 }
 
 class UsbMixerOffer {
@@ -67,7 +72,7 @@ class UsbOutput {
     return _hotplug ??= _events.receiveBroadcastStream().map((raw) {
       final map = raw is Map ? raw : const {};
       return UsbHotplugEvent(
-        attached: map['event'] == 'attached',
+        kind: '${map['event'] ?? ''}',
         id: (map['id'] as num?)?.toInt() ?? 0,
         channels: (map['channels'] as num?)?.toInt() ?? 0,
         name: '${map['name'] ?? ''}',

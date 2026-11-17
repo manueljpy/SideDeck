@@ -8,6 +8,8 @@ import android.media.AudioManager
 import android.media.AudioMixerAttributes
 import android.media.AudioTrack
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.RequiresApi
 import java.nio.ByteBuffer
@@ -21,9 +23,13 @@ import kotlin.math.max
  *  1. Android 14+ preferred mixer attributes, which reconfigure the USB output
  *     stream itself. Without this the stream is usually opened as stereo and
  *     AudioFlinger silently drops channels 3-4.
- *  2. A plain AudioTrack with a channel index mask, which is the only other
- *     Android API that addresses USB channels by number rather than by speaker
- *     position (Oboe/AAudio treat a 4ch device as QUAD and drive the front pair).
+ *  2. A plain AudioTrack with a channel index mask, which addresses USB channels
+ *     by number rather than by speaker position.
+ *
+ * Not Oboe/AAudio: some devices still drive only the front pair of a 4ch stream
+ * (google/oboe#2204), and before Android 17 AAudio treats the output reopen caused
+ * by preferred mixer attributes as a disconnect, where AudioTrack restores itself
+ * (google/oboe#2343).
  */
 object UsbPlayer {
     init {
@@ -46,10 +52,19 @@ object UsbPlayer {
     private var audioManager: AudioManager? = null
     private var preferredDevice: AudioDeviceInfo? = null
     private var preferredAttributes: AudioAttributes? = null
+    private var activeDeviceId = 0
+    private var activeDeviceName = ""
+    @Volatile
+    private var unexpectedStopListener: ((Int, String) -> Unit)? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private fun mediaAttributes() = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
         .build()
+
+    fun setUnexpectedStopListener(listener: ((id: Int, name: String) -> Unit)?) {
+        unexpectedStopListener = listener
+    }
 
     @Synchronized
     fun start(context: Context, handle: Long, deviceId: Int, channels: Int): Map<String, Any> {
@@ -76,6 +91,8 @@ object UsbPlayer {
         val actual = t.channelCount
         val routed = t.routedDevice
         val encoding = t.audioFormat
+        activeDeviceId = routed?.id ?: deviceId
+        activeDeviceName = routed?.productName?.toString() ?: ""
         running = true
         thread = Thread({ loop(handle, actual, encoding) }, "sidedeck-usb").apply {
             priority = Thread.MAX_PRIORITY
@@ -89,8 +106,8 @@ object UsbPlayer {
         return mapOf(
             "ok" to ok,
             "channels" to actual,
-            "routedId" to (routed?.id ?: deviceId),
-            "routedName" to (routed?.productName?.toString() ?: ""),
+            "routedId" to activeDeviceId,
+            "routedName" to activeDeviceName,
             "error" to if (ok) "" else "Only $actual channels available over USB",
         )
     }
@@ -108,7 +125,19 @@ object UsbPlayer {
         }
         track?.release()
         track = null
+        activeDeviceId = 0
+        activeDeviceName = ""
         clearPreferred()
+    }
+
+    /** Write-loop failure (not an intentional [stop]). Notifies Flutter on the main thread. */
+    private fun signalUnexpectedStop() {
+        if (!running) return
+        running = false
+        val id = activeDeviceId
+        val name = activeDeviceName
+        val listener = unexpectedStopListener ?: return
+        mainHandler.post { listener(id, name) }
     }
 
     private fun clearPreferred() {
@@ -379,11 +408,13 @@ object UsbPlayer {
                 }
                 if (written < 0) {
                     Log.e("sidedeck", "usb write error $written")
+                    signalUnexpectedStop()
                     return
                 }
                 if (written == 0) {
                     if (++stalls >= MAX_STALLS) {
                         Log.e("sidedeck", "usb track stopped consuming audio; giving up")
+                        signalUnexpectedStop()
                         return
                     }
                     Thread.sleep(STALL_SLEEP_MS)
