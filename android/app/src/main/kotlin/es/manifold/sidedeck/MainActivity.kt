@@ -5,15 +5,23 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private var usbHotplug: UsbHotplug? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    // startAndVerify() can sleep; keep that off the Flutter/UI thread.
+    private val usbExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "sidedeck-usb-ctrl")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,24 +55,42 @@ class MainActivity : FlutterActivity() {
                         val handle = (call.argument<Number>("handle") ?: 0).toLong()
                         val deviceId = call.argument<Int>("deviceId") ?: 0
                         val channels = call.argument<Int>("channels") ?: 4
-                        result.success(UsbPlayer.start(this, handle, deviceId, channels))
+                        val appCtx = applicationContext
+                        usbExecutor.execute {
+                            val map = UsbPlayer.start(appCtx, handle, deviceId, channels)
+                            mainHandler.post { result.success(map) }
+                        }
                     }
                     "stopUsbPlayback" -> {
-                        UsbPlayer.stop()
-                        result.success(null)
+                        usbExecutor.execute {
+                            UsbPlayer.stop()
+                            mainHandler.post { result.success(null) }
+                        }
                     }
                     else -> result.notImplemented()
                 }
             }
         val hotplug = UsbHotplug(this)
         usbHotplug = hotplug
+        UsbPlayer.setUnexpectedStopListener { id, name ->
+            hotplug.emit(
+                mapOf(
+                    "event" to "playback_stopped",
+                    "id" to id,
+                    "channels" to 0,
+                    "name" to name,
+                ),
+            )
+        }
         EventChannel(messenger, "sidedeck/usb").setStreamHandler(hotplug)
     }
 
     override fun onDestroy() {
+        UsbPlayer.setUnexpectedStopListener(null)
         usbHotplug?.stop()
         usbHotplug = null
         UsbPlayer.stop()
+        usbExecutor.shutdownNow()
         super.onDestroy()
     }
 

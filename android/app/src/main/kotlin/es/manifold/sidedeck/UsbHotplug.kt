@@ -54,7 +54,11 @@ class UsbHotplug(context: Context) : EventChannel.StreamHandler {
         registered = false
     }
 
-    private fun emit(payload: Map<String, Any>) {
-        sink?.success(payload)
+    fun emit(payload: Map<String, Any>) {
+        if (Looper.myLooper() == handler.looper) {
+            sink?.success(payload)
+        } else {
+            handler.post { sink?.success(payload) }
+        }
     }
 }
