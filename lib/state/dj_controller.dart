@@ -356,10 +356,14 @@ class DjController extends ChangeNotifier {
   final List<double> _nudgeBend = [0, 0]; // temporary pitch bend while held
   final List<Timer?> _nudgeHold = [null, null];
 
-  void _applyRate(int deckIndex) {
+  /// Rate actually sent to the engine (includes temporary pitch bend).
+  double effectiveRate(int deckIndex) {
     final d = deck(deckIndex);
-    final effective = (d.rate * (1.0 + _nudgeBend[deckIndex])).clamp(0.5, 2.0);
-    _engine.setRate(deckIndex, effective);
+    return (d.rate * (1.0 + _nudgeBend[deckIndex])).clamp(0.5, 2.0);
+  }
+
+  void _applyRate(int deckIndex) {
+    _engine.setRate(deckIndex, effectiveRate(deckIndex));
   }
 
   /// ±0.1 BPM (heard tempo). Rate is derived from the track's original BPM.

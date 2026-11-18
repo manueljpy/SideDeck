@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 /// Horizontal scrolling DJ waveform: playhead pinned center, regular beat grid.
 class WaveformPainter extends CustomPainter {
@@ -13,6 +14,7 @@ class WaveformPainter extends CustomPainter {
     required this.beatOffset,
     required this.bpm,
     required this.color,
+    required this.peak,
     this.rate = 1,
     this.loopEnabled = false,
     this.loopStart = 0,
@@ -28,6 +30,8 @@ class WaveformPainter extends CustomPainter {
   final double beatOffset;
   final double bpm;
   final Color color;
+  /// Max abs amplitude across [min]/[max]; computed once when the wave data changes.
+  final double peak;
   /// Playback rate (file seconds per heard second). Zooms the scrolling
   /// waveform in heard-time so synced decks share a beat grid.
   final double rate;
@@ -45,11 +49,7 @@ class WaveformPainter extends CustomPainter {
       return;
     }
 
-    var peak = 0.001;
     final n = math.min(min.length, max.length);
-    for (var i = 0; i < n; i++) {
-      peak = math.max(peak, math.max(min[i].abs(), max[i].abs()));
-    }
 
     const overviewH = WaveformPainter.overviewH;
     final waveTop = overviewH;
@@ -330,9 +330,11 @@ class WaveformPainter extends CustomPainter {
         oldDelegate.duration != duration ||
         oldDelegate.min != min ||
         oldDelegate.max != max ||
+        oldDelegate.peak != peak ||
         oldDelegate.beatOffset != beatOffset ||
         oldDelegate.bpm != bpm ||
         oldDelegate.rate != rate ||
+        oldDelegate.color != color ||
         oldDelegate.loopEnabled != loopEnabled ||
         oldDelegate.loopStart != loopStart ||
         oldDelegate.loopEnd != loopEnd ||
@@ -340,7 +342,7 @@ class WaveformPainter extends CustomPainter {
   }
 }
 
-class WaveformView extends StatelessWidget {
+class WaveformView extends StatefulWidget {
   const WaveformView({
     super.key,
     required this.min,
@@ -348,6 +350,7 @@ class WaveformView extends StatelessWidget {
     required this.position,
     required this.duration,
     required this.color,
+    this.playing = false,
     this.beatOffset = 0,
     this.bpm = 0,
     this.rate = 1,
@@ -362,6 +365,7 @@ class WaveformView extends StatelessWidget {
   final Float32List max;
   final double position;
   final double duration;
+  final bool playing;
   final double beatOffset;
   final double bpm;
   final double rate;
@@ -377,7 +381,97 @@ class WaveformView extends StatelessWidget {
   static const zoom = 8.0;
 
   @override
+  State<WaveformView> createState() => _WaveformViewState();
+}
+
+class _WaveformViewState extends State<WaveformView>
+    with SingleTickerProviderStateMixin {
+  // Engine positions arrive ~every 50 ms; between reports, advance at [rate]
+  // and ease out the residual so the wave doesn't hitch on each poll.
+  late final Ticker _ticker = createTicker(_onFrame);
+  double _base = 0;
+  Duration _baseAt = Duration.zero;
+  double _error = 0;
+  double _shown = 0;
+  Duration _now = Duration.zero;
+  double _peak = 0.001;
+
+  static const _snapSec = 0.25;
+  static const _easeSec = 0.1;
+
+  @override
+  void initState() {
+    super.initState();
+    _base = _shown = widget.position;
+    _refreshPeak();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(WaveformView old) {
+    super.didUpdateWidget(old);
+    if (!identical(widget.min, old.min) || !identical(widget.max, old.max)) {
+      _refreshPeak();
+    }
+    // Re-base when the engine position jumps, transport starts/stops, or the
+    // audible rate changes (BPM nudge / sync / pitch bend) so we don't keep
+    // integrating an old rate over a long dt.
+    if (widget.position != old.position ||
+        widget.playing != old.playing ||
+        widget.rate != old.rate) {
+      final err = _shown - widget.position;
+      _error = widget.playing && err.abs() < _snapSec ? err : 0;
+      _base = widget.position;
+      _baseAt = _now;
+      if (!widget.playing) _shown = widget.position;
+    }
+    _syncTicker();
+  }
+
+  void _refreshPeak() {
+    var peak = 0.001;
+    final n = math.min(widget.min.length, widget.max.length);
+    for (var i = 0; i < n; i++) {
+      peak = math.max(peak, math.max(widget.min[i].abs(), widget.max[i].abs()));
+    }
+    _peak = peak;
+  }
+
+  void _syncTicker() {
+    if (widget.playing && !_ticker.isActive) {
+      // Ticker elapsed restarts at zero when started.
+      _now = _baseAt = Duration.zero;
+      _ticker.start();
+    } else if (!widget.playing && _ticker.isActive) {
+      _ticker.stop();
+    }
+  }
+
+  void _onFrame(Duration elapsed) {
+    _now = elapsed;
+    final dt = (elapsed - _baseAt).inMicroseconds / 1e6;
+    final ease = math.exp(-dt / _easeSec);
+    var t = _base + dt * widget.rate + _error * ease;
+    final w = widget;
+    final loopLen = w.loopEnd - w.loopStart;
+    if (w.loopEnabled && loopLen > 0 && _base <= w.loopEnd && t > w.loopEnd) {
+      t = w.loopStart + (t - w.loopEnd) % loopLen;
+    }
+    final next = t.clamp(0.0, w.duration).toDouble();
+    if (next == _shown) return;
+    setState(() => _shown = next);
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final w0 = widget;
+    final shown = w0.playing ? _shown : w0.position;
     return LayoutBuilder(
       builder: (context, constraints) {
         final w = constraints.maxWidth.isFinite ? constraints.maxWidth : 300.0;
@@ -386,38 +480,40 @@ class WaveformView extends StatelessWidget {
             : 88.0;
         final paint = CustomPaint(
           painter: WaveformPainter(
-            min: min,
-            max: max,
-            position: position,
-            duration: duration,
-            beatOffset: beatOffset,
-            bpm: bpm,
-            rate: rate,
-            color: color,
-            loopEnabled: loopEnabled,
-            loopStart: loopStart,
-            loopEnd: loopEnd,
-            zoomWindowSec: zoom,
-            showJumpZone: onSeek != null,
+            min: w0.min,
+            max: w0.max,
+            position: shown,
+            duration: w0.duration,
+            beatOffset: w0.beatOffset,
+            bpm: w0.bpm,
+            rate: w0.rate,
+            color: w0.color,
+            peak: _peak,
+            loopEnabled: w0.loopEnabled,
+            loopStart: w0.loopStart,
+            loopEnd: w0.loopEnd,
+            zoomWindowSec: WaveformView.zoom,
+            showJumpZone: w0.onSeek != null,
           ),
           size: Size(w, h),
         );
-        if ((onSeek == null && onOverviewSeek == null) || duration <= 0) {
+        if ((w0.onSeek == null && w0.onOverviewSeek == null) ||
+            w0.duration <= 0) {
           return paint;
         }
         return GestureDetector(
           onTapDown: (d) {
             final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
             if (d.localPosition.dy < WaveformPainter.overviewH) {
-              onOverviewSeek?.call(nx * duration);
+              w0.onOverviewSeek?.call(nx * w0.duration);
               return;
             }
-            if (onSeek == null) return;
+            if (w0.onSeek == null) return;
             if ((nx - 0.5).abs() > WaveformPainter.jumpHalf) return;
-            final playRate = rate.clamp(0.5, 2.0);
-            final heard = (nx - 0.5) * zoom;
-            final t = position + heard * playRate;
-            onSeek!(t.clamp(0.0, duration).toDouble());
+            final playRate = w0.rate.clamp(0.5, 2.0);
+            final heard = (nx - 0.5) * WaveformView.zoom;
+            final t = shown + heard * playRate;
+            w0.onSeek!(t.clamp(0.0, w0.duration).toDouble());
           },
           child: paint,
         );
