@@ -1,0 +1,4 @@
+- Fix silent USB mixer playback on some Samsung / Qualcomm devices
+- Start USB audio off the UI thread and fall back if playback dies
+- Keep master tempo when sync swaps which track is master
+- Smoother waveform scrolling
